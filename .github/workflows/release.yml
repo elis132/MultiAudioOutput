@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Get version from tag
+      id: get_version
+      run: |
+        $version = "${{ github.ref_name }}".TrimStart('v')
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "Version: $version"
+      shell: pwsh
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build and Publish
+      run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o artifacts/publish
+
+    - name: Copy resources to publish directory
+      run: |
+        New-Item -ItemType Directory -Force -Path "artifacts/publish/Resources"
+        Copy-Item "Resources/icon.ico" "artifacts/publish/Resources/" -Force
+        Copy-Item "Resources/background.png" "artifacts/publish/Resources/" -Force -ErrorAction SilentlyContinue
+        Copy-Item "LICENSE" "artifacts/publish/" -Force
+        Copy-Item "README.md" "artifacts/publish/" -Force
+        Copy-Item "CHANGELOG.md" "artifacts/publish/" -Force
+      shell: pwsh
+
+    - name: Create portable ZIP
+      run: |
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+        Compress-Archive -Path "artifacts/publish/*" -DestinationPath "artifacts/MultiAudioOutput-Portable-v$version-x64.zip"
+      shell: pwsh
+
+    - name: Setup Inno Setup
+      run: choco install innosetup -y
+
+    - name: Build installer
+      run: |
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+        # Update version in setup.iss
+        $setupContent = Get-Content "installer/setup.iss" -Raw
+        $setupContent = $setupContent -replace '#define MyAppVersion ".*"', "#define MyAppVersion ""$version"""
+        $setupContent | Set-Content "installer/setup-temp.iss"
+
+        # Build installer
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup-temp.iss"
+
+        # Rename output
+        Move-Item "installer/Output/MultiAudioOutput-Setup-*.exe" "artifacts/MultiAudioOutput-Setup-v$version-x64.exe"
+      shell: pwsh
+
+    - name: Generate SHA256 checksums
+      run: |
+        cd artifacts
+        $files = Get-ChildItem -Filter "MultiAudioOutput-*" | Where-Object { $_.Extension -in ".zip", ".exe" }
+        foreach ($file in $files) {
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
+          "$hash  $($file.Name)" | Out-File -Append -Encoding utf8 "SHA256SUMS.txt"
+        }
+        Get-Content "SHA256SUMS.txt"
+      shell: pwsh
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Multi Audio Output ${{ steps.get_version.outputs.VERSION }}
+        body_path: CHANGELOG.md
+        files: |
+          artifacts/MultiAudioOutput-Portable-*.zip
+          artifacts/MultiAudioOutput-Setup-*.exe
+          artifacts/SHA256SUMS.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

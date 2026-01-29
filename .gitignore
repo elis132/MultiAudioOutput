@@ -1,0 +1,77 @@
+# Build results
+bin/
+obj/
+publish/
+artifacts/
+
+# Build artifact folders (temp development builds)
+ALL_DEVICES/
+CUSTOM_DROPDOWN/
+DEBOUNCE_FIX/
+DROPDOWN_HEIGHT_FIX/
+DROPDOWN_TOGGLE_FIX/
+FINAL_BUILD/
+FINAL_BUILD_v2/
+FINAL_POLISH/
+FINAL_TOGGLE_FIX/
+FINAL_V2/
+FIXED_DROPDOWN/
+FLAG_TOGGLE_FIX/
+COMMERCIAL_GRADE/
+MATCHED_COLORS/
+OPTIMIZED_DROPDOWN/
+PERFORMANCE_FIX/
+ROUNDED_CORNERS_FIX/
+STANDARD_DROPDOWN/
+STANDARD_FAST/
+TOGGLE_FIX/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+packages/
+*.nupkg
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build outputs (standalone exes from manual builds)
+*.exe
+!installer/Output/*.exe
+*.dll
+*.pdb
+
+# Test results
+TestResults/
+*.trx
+
+# Installer outputs
+installer/Output/
+installer/temp/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Playwright
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# Runtime
+*.pid
+*.lock

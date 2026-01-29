@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build (Debug)
+      run: dotnet build --configuration Debug --no-restore
+
+    - name: Build (Release)
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Publish
+      run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o artifacts/publish
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: MultiAudioOutput-Build-${{ github.sha }}
+        path: artifacts/publish/
+        retention-days: 7
+
+    - name: Check for resource files
+      run: |
+        if (Test-Path "Resources/icon.ico") { Write-Host "✓ icon.ico found" } else { Write-Error "✗ icon.ico missing" }
+        if (Test-Path "Resources/background.png") { Write-Host "✓ background.png found" } else { Write-Warning "⚠ background.png optional" }
+      shell: pwsh
