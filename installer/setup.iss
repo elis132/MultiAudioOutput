@@ -28,7 +28,6 @@ DisableProgramGroupPage=yes
 
 ; License and info
 LicenseFile=EULA.txt
-InfoBeforeFile=..\README.md
 
 ; Output
 OutputDir=Output
@@ -44,8 +43,6 @@ SolidCompression=yes
 
 ; UI
 WizardStyle=modern
-WizardImageFile=..\Resources\installer-sidebar.bmp
-WizardSmallImageFile=..\Resources\installer-logo.bmp
 DisableWelcomePage=no
 
 ; Privileges
