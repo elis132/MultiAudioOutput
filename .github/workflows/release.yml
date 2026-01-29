@@ -51,21 +51,55 @@ jobs:
       shell: pwsh
 
     - name: Setup Inno Setup
-      run: choco install innosetup -y
+      run: |
+        choco install innosetup -y
+        refreshenv
+      shell: pwsh
+
+    - name: Wait for Inno Setup installation
+      run: Start-Sleep -Seconds 5
+      shell: pwsh
+
+    - name: Find Inno Setup
+      id: find_inno
+      run: |
+        $innoPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        if (Test-Path $innoPath) {
+          echo "INNO_PATH=$innoPath" >> $env:GITHUB_OUTPUT
+          echo "Found Inno Setup at: $innoPath"
+        } else {
+          Write-Error "Inno Setup not found at expected location"
+          exit 1
+        }
+      shell: pwsh
 
     - name: Build installer
       run: |
         $version = "${{ steps.get_version.outputs.VERSION }}"
+        $innoPath = "${{ steps.find_inno.outputs.INNO_PATH }}"
+
         # Update version in setup.iss
         $setupContent = Get-Content "installer/setup.iss" -Raw
         $setupContent = $setupContent -replace '#define MyAppVersion ".*"', "#define MyAppVersion ""$version"""
         $setupContent | Set-Content "installer/setup-temp.iss"
 
         # Build installer
-        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup-temp.iss"
+        & $innoPath "installer/setup-temp.iss"
 
-        # Rename output
-        Move-Item "installer/Output/MultiAudioOutput-Setup-*.exe" "artifacts/MultiAudioOutput-Setup-v$version-x64.exe"
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Installer build failed with exit code $LASTEXITCODE"
+          exit 1
+        }
+
+        # Find and rename output
+        $installerPath = Get-ChildItem "installer/Output" -Filter "MultiAudioOutput-Setup-*.exe" | Select-Object -First 1
+        if ($installerPath) {
+          Move-Item $installerPath.FullName "artifacts/MultiAudioOutput-Setup-v$version-x64.exe"
+          echo "Installer created successfully"
+        } else {
+          Write-Error "Installer not found in Output directory"
+          exit 1
+        }
       shell: pwsh
 
     - name: Generate SHA256 checksums
@@ -83,7 +117,33 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         name: Multi Audio Output ${{ steps.get_version.outputs.VERSION }}
-        body_path: CHANGELOG.md
+        body: |
+          # Multi Audio Output v${{ steps.get_version.outputs.VERSION }}
+
+          ## Downloads
+
+          - **Installer (Recommended)**: `MultiAudioOutput-Setup-v${{ steps.get_version.outputs.VERSION }}-x64.exe`
+          - **Portable Version**: `MultiAudioOutput-Portable-v${{ steps.get_version.outputs.VERSION }}-x64.zip`
+
+          ## Installation
+
+          ### Using Installer
+          1. Download `MultiAudioOutput-Setup-v${{ steps.get_version.outputs.VERSION }}-x64.exe`
+          2. Run the installer
+          3. Follow the setup wizard
+
+          ### Portable
+          1. Download `MultiAudioOutput-Portable-v${{ steps.get_version.outputs.VERSION }}-x64.zip`
+          2. Extract to any folder
+          3. Run `MultiAudioOutput.exe`
+
+          ## Verify Downloads
+
+          Check `SHA256SUMS.txt` for file checksums.
+
+          ## What's New
+
+          See [CHANGELOG.md](https://github.com/elis132/MultiAudioOutput/blob/main/CHANGELOG.md) for full changelog.
         files: |
           artifacts/MultiAudioOutput-Portable-*.zip
           artifacts/MultiAudioOutput-Setup-*.exe
