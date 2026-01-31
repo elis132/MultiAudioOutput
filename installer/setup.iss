@@ -2,7 +2,7 @@
 ; Inno Setup 6.x or later required
 
 #define MyAppName "Multi Audio Output"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "elis132"
 #define MyAppURL "https://github.com/elis132/MultiAudioOutput"
 #define MyAppExeName "MultiAudioOutput.exe"
