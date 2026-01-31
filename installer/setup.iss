@@ -57,6 +57,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
 UninstallFilesDir={app}\uninstall
 
+; Upgrade behavior
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+UsePreviousTasks=yes
+CloseApplications=yes
+CloseApplicationsFilter=*.exe
+RestartApplications=yes
+
 ; Version info
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
@@ -124,11 +132,47 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillApp"
 
 [Code]
+function IsUpgrade(): Boolean;
+var
+  PrevPath: String;
+begin
+  Result := RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+    'UninstallString', PrevPath) or
+    RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+    'UninstallString', PrevPath);
+end;
+
+function GetPreviousVersion(): String;
+var
+  Version: String;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+    'DisplayVersion', Version) then
+    Result := Version
+  else if RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+    'DisplayVersion', Version) then
+    Result := Version;
+end;
+
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
+  PrevVersion: String;
 begin
   Result := True;
+
+  // Check for upgrade
+  if IsUpgrade() then
+  begin
+    PrevVersion := GetPreviousVersion();
+    if PrevVersion <> '' then
+      MsgBox('Upgrading {#MyAppName} from version ' + PrevVersion + ' to {#MyAppVersion}.',
+             mbInformation, MB_OK);
+  end;
+
+  // Close running instance
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // Check if .NET 8.0 Runtime is installed
   if not RegKeyExists(HKLM64, 'SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedhost') then

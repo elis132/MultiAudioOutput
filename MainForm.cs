@@ -34,6 +34,7 @@ public partial class MainForm : Form
     private Button startButton = null!;
     private Button stopButton = null!;
     private Button refreshButton = null!;
+    private Button testButton = null!;
     private Label statusLabel = null!;
     private CustomDropdown sourceCombo = null!;
     private Panel titleBar = null!;
@@ -330,13 +331,19 @@ public partial class MainForm : Form
         settingsBtn.Font = new Font("Segoe UI", 20, FontStyle.Bold);
         btnContainer.Controls.Add(settingsBtn);
 
+        testButton = CreateIconButton("🔊", 45, 45);
+        testButton.Location = new Point(110, 0);
+        testButton.Click += (s, e) => PlayTestSound();
+        mainTooltip.SetToolTip(testButton, "Test Sound");
+        btnContainer.Controls.Add(testButton);
+
         startButton = CreatePrimaryButton("▶ START", 200, 45);
-        startButton.Location = new Point(120, 0);
+        startButton.Location = new Point(165, 0);
         startButton.Click += StartButton_Click;
         btnContainer.Controls.Add(startButton);
 
         stopButton = CreateDangerButton("Stop", 200, 45);
-        stopButton.Location = new Point(120, 0);
+        stopButton.Location = new Point(165, 0);
         stopButton.Visible = false;
         stopButton.Click += StopButton_Click;
         btnContainer.Controls.Add(stopButton);
@@ -490,9 +497,9 @@ public partial class MainForm : Form
 
         var enumerator = new MMDeviceEnumerator();
 
-        // Add all audio devices to source dropdown (both output and input)
-        var allDevices = enumerator.EnumerateAudioEndPoints(DataFlow.All, DeviceState.Active).ToList();
-        foreach (var device in allDevices)
+        // Add only render (output) devices to source dropdown - loopback capture only works with output devices
+        var sourceDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
+        foreach (var device in sourceDevices)
         {
             sourceCombo.Items.Add(new DeviceItem(device));
         }
@@ -626,7 +633,7 @@ public partial class MainForm : Form
 
                 if (outputDevice == null) continue;
 
-                var output = new WasapiOut(outputDevice, AudioClientShareMode.Shared, false, 50);
+                var output = new WasapiOut(outputDevice, AudioClientShareMode.Shared, true, 15);
                 var mixer = new ChannelMixingProvider(loopbackCapture.WaveFormat, card.ChannelMode);
 
                 outputDevices.Add(output);
@@ -695,6 +702,91 @@ public partial class MainForm : Form
             trayIcon.Text = "Multi Audio Output";
         }
         catch { }
+    }
+
+    private void PlayTestSound()
+    {
+        var selectedCards = deviceCards.Where(c => c.IsEnabled).ToList();
+        if (selectedCards.Count == 0)
+        {
+            MessageBox.Show("Select at least one output device to test.", "Test Sound", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        statusLabel.Text = "Playing test sound...";
+        statusLabel.ForeColor = Accent;
+
+        Task.Run(() =>
+        {
+            var testOutputs = new List<WasapiOut>();
+            try
+            {
+                var enumerator = new MMDeviceEnumerator();
+
+                // Generate a short test tone (440Hz sine wave for 500ms)
+                var sampleRate = 44100;
+                var frequency = 440.0;
+                var duration = 0.5;
+                var samples = (int)(sampleRate * duration);
+                var buffer = new byte[samples * 4]; // 16-bit stereo
+
+                for (int i = 0; i < samples; i++)
+                {
+                    var sample = (short)(Math.Sin(2 * Math.PI * frequency * i / sampleRate) * 16000);
+                    // Fade in/out to avoid clicks
+                    var envelope = 1.0;
+                    if (i < sampleRate * 0.02) envelope = i / (sampleRate * 0.02);
+                    if (i > samples - sampleRate * 0.02) envelope = (samples - i) / (sampleRate * 0.02);
+                    sample = (short)(sample * envelope);
+
+                    var bytes = BitConverter.GetBytes(sample);
+                    buffer[i * 4] = bytes[0];     // Left
+                    buffer[i * 4 + 1] = bytes[1];
+                    buffer[i * 4 + 2] = bytes[0]; // Right
+                    buffer[i * 4 + 3] = bytes[1];
+                }
+
+                var waveFormat = new WaveFormat(sampleRate, 16, 2);
+
+                foreach (var card in selectedCards)
+                {
+                    var device = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                        .FirstOrDefault(d => d.ID == card.DeviceId);
+
+                    if (device == null) continue;
+
+                    var output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
+                    var provider = new RawSourceWaveStream(new MemoryStream(buffer), waveFormat);
+                    output.Init(provider);
+                    testOutputs.Add(output);
+                }
+
+                // Play on all devices simultaneously
+                foreach (var output in testOutputs)
+                    output.Play();
+
+                // Wait for playback to finish
+                Thread.Sleep(600);
+
+                foreach (var output in testOutputs)
+                {
+                    output.Stop();
+                    output.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                this.Invoke(() => MessageBox.Show($"Test failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error));
+            }
+            finally
+            {
+                this.Invoke(() =>
+                {
+                    statusLabel.Text = isRunning ? $"Playing on {outputDevices.Count} device(s)" : "Ready";
+                    statusLabel.ForeColor = isRunning ? Accent : Text2;
+                });
+            }
+        });
     }
 
     private void ShowSettingsDialog()
@@ -1481,54 +1573,52 @@ class LanguageItem
     public override string ToString() => Name;
 }
 
-// Channel mixing provider (same as before)
+// Channel mixing provider using NAudio's optimized BufferedWaveProvider
 class ChannelMixingProvider : IWaveProvider
 {
-    private readonly WaveFormat waveFormat;
+    private readonly BufferedWaveProvider bufferedProvider;
     private readonly int channelMode;
-    private readonly Queue<byte> buffer = new();
 
-    public WaveFormat WaveFormat => waveFormat;
+    public WaveFormat WaveFormat => bufferedProvider.WaveFormat;
 
     public ChannelMixingProvider(WaveFormat sourceFormat, int mode)
     {
-        waveFormat = sourceFormat;
         channelMode = mode;
+        bufferedProvider = new BufferedWaveProvider(sourceFormat)
+        {
+            // Discard old audio when buffer is full - prevents latency buildup
+            DiscardOnBufferOverflow = true,
+            // Small buffer = low latency
+            BufferLength = sourceFormat.AverageBytesPerSecond / 14  // ~70ms max
+        };
     }
 
     public void AddSamples(byte[] samples, int offset, int count)
     {
-        lock (buffer)
-        {
-            for (int i = 0; i < count; i++)
-                buffer.Enqueue(samples[offset + i]);
-        }
+        bufferedProvider.AddSamples(samples, offset, count);
     }
 
     public int Read(byte[] outBuffer, int offset, int count)
     {
-        lock (buffer)
+        int read = bufferedProvider.Read(outBuffer, offset, count);
+
+        // Fill any remaining with silence
+        if (read < count)
         {
-            int bytesRead = Math.Min(count, buffer.Count);
-            bytesRead -= bytesRead % (waveFormat.BitsPerSample / 8 * waveFormat.Channels);
-
-            for (int i = 0; i < bytesRead; i++)
-            {
-                outBuffer[offset + i] = buffer.Dequeue();
-            }
-
-            if (channelMode > 0 && waveFormat.Channels == 2)
-            {
-                ApplyChannelMixing(outBuffer, offset, bytesRead);
-            }
-
-            return bytesRead;
+            Array.Clear(outBuffer, offset + read, count - read);
         }
+
+        if (channelMode > 0 && bufferedProvider.WaveFormat.Channels == 2 && read > 0)
+        {
+            ApplyChannelMixing(outBuffer, offset, read);
+        }
+
+        return count;
     }
 
     private void ApplyChannelMixing(byte[] buffer, int offset, int count)
     {
-        int bytesPerSample = waveFormat.BitsPerSample / 8;
+        int bytesPerSample = bufferedProvider.WaveFormat.BitsPerSample / 8;
         int samplePairs = count / (bytesPerSample * 2);
 
         for (int i = 0; i < samplePairs; i++)
