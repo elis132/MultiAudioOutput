@@ -495,7 +495,7 @@ public partial class MainForm : Form
         deviceCards.Clear();
         sourceCombo.Items.Clear();
 
-        var enumerator = new MMDeviceEnumerator();
+        using var enumerator = new MMDeviceEnumerator();
 
         // Add only render (output) devices to source dropdown - loopback capture only works with output devices
         var sourceDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
@@ -621,15 +621,17 @@ public partial class MainForm : Form
             var sourceDevice = sourceItem.Device;
             loopbackCapture = new WasapiLoopbackCapture(sourceDevice);
 
+            using var enumerator = new MMDeviceEnumerator();
+            var outputDevicesById = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                .ToDictionary(device => device.ID, device => device);
+
             foreach (var card in selectedCards)
             {
                 // Skip if output is same as source
                 if (card.DeviceId == sourceDevice.ID)
                     continue;
 
-                var enumerator = new MMDeviceEnumerator();
-                var outputDevice = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-                    .FirstOrDefault(d => d.ID == card.DeviceId);
+                outputDevicesById.TryGetValue(card.DeviceId, out var outputDevice);
 
                 if (outputDevice == null) continue;
 
@@ -642,6 +644,8 @@ public partial class MainForm : Form
 
             if (outputDevices.Count == 0)
             {
+                loopbackCapture?.Dispose();
+                loopbackCapture = null;
                 MessageBox.Show(Localization.Get("NoValidOutputs"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -719,9 +723,10 @@ public partial class MainForm : Form
         Task.Run(() =>
         {
             var testOutputs = new List<WasapiOut>();
+            var testStreams = new List<Stream>();
             try
             {
-                var enumerator = new MMDeviceEnumerator();
+                using var enumerator = new MMDeviceEnumerator();
 
                 // Generate a short test tone (440Hz sine wave for 500ms)
                 var sampleRate = 44100;
@@ -756,8 +761,11 @@ public partial class MainForm : Form
                     if (device == null) continue;
 
                     var output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
-                    var provider = new RawSourceWaveStream(new MemoryStream(buffer), waveFormat);
+                    var stream = new MemoryStream(buffer, writable: false);
+                    var provider = new RawSourceWaveStream(stream, waveFormat);
                     output.Init(provider);
+                    testStreams.Add(provider);
+                    testStreams.Add(stream);
                     testOutputs.Add(output);
                 }
 
@@ -773,6 +781,9 @@ public partial class MainForm : Form
                     output.Stop();
                     output.Dispose();
                 }
+
+                foreach (var stream in testStreams)
+                    stream.Dispose();
             }
             catch (Exception ex)
             {
