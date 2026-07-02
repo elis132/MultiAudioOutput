@@ -50,6 +50,15 @@ public partial class MainForm : Form
     private CustomDropdown sourceCombo = null!;    // Source device selection dropdown
     private Panel titleBar = null!;                // Custom title bar for borderless window
     private ToolTip mainTooltip = null!;           // Themed tooltip for UI elements
+
+    // Controls whose text is re-applied when the language changes
+    private Label sourceLabel = null!;
+    private Label outputsLabel = null!;
+    private ToolStripMenuItem trayShowItem = null!;
+    private ToolStripMenuItem trayStartItem = null!;
+    private ToolStripMenuItem trayStopItem = null!;
+    private ToolStripMenuItem traySettingsItem = null!;
+    private ToolStripMenuItem trayExitItem = null!;
     #endregion
 
     #region Audio State
@@ -57,20 +66,16 @@ public partial class MainForm : Form
     private WasapiLoopbackCapture? loopbackCapture;                  // Captures audio from source device
     private readonly List<WasapiOut> outputDevices = new();          // Active output device instances
     private readonly List<ChannelMixingProvider> mixers = new();     // Audio processors for each output
+    private readonly Dictionary<string, ChannelMixingProvider> mixersByDeviceId = new(); // For live volume changes
     private bool isRunning = false;                                   // Whether audio routing is active
+
+    // Debounces settings writes while a volume slider is being dragged
+    private System.Windows.Forms.Timer? settingsSaveTimer;
     #endregion
 
     #region Settings and State
     private AppSettings settings = null!;  // Persisted application settings
     private bool startMinimized;           // Whether app started minimized (from command line)
-
-    // Pulse animation for visual feedback when running
-    private System.Windows.Forms.Timer? pulseTimer;
-    private float pulseValue = 0f;
-
-    // Window dragging state (for borderless window)
-    private Point lastMousePosition;
-    private bool isDragging = false;
     #endregion
 
     #region Windows API Imports
@@ -80,6 +85,28 @@ public partial class MainForm : Form
     /// </summary>
     [DllImport("dwmapi.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
     private static extern void DwmSetWindowAttribute(IntPtr hwnd, uint attr, ref int attrValue, int attrSize);
+
+    // Native move/resize for the borderless window. Sending WM_NCLBUTTONDOWN with a
+    // hit-test code lets Windows run its own move/size loop (smooth dragging, snap, etc.)
+    [DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+
+    private const int WM_NCLBUTTONDOWN = 0xA1;
+    private const int HTCAPTION = 2;
+    private const int HTLEFT = 10;
+    private const int HTRIGHT = 11;
+    private const int HTTOP = 12;
+    private const int HTTOPLEFT = 13;
+    private const int HTTOPRIGHT = 14;
+    private const int HTBOTTOM = 15;
+    private const int HTBOTTOMLEFT = 16;
+    private const int HTBOTTOMRIGHT = 17;
+
+    // Width in pixels of the invisible resize band along the window edges
+    private const int ResizeGrip = 8;
     #endregion
 
     #region Constructor and Initialization
@@ -107,15 +134,6 @@ public partial class MainForm : Form
         {
             Load += (s, e) => StartAudio();
         }
-
-        // Setup pulse animation timer for visual feedback
-        pulseTimer = new System.Windows.Forms.Timer { Interval = 50 };
-        pulseTimer.Tick += (s, e) =>
-        {
-            pulseValue = (pulseValue + 0.1f) % (float)(Math.PI * 2);
-            if (isRunning) Invalidate(true);
-        };
-        pulseTimer.Start();
     }
 
     /// <summary>
@@ -144,6 +162,7 @@ public partial class MainForm : Form
         // === Window Configuration ===
         Text = "Multi Audio Output";
         Size = new Size(900, 680);
+        MinimumSize = new Size(760, 620);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.None;  // Borderless for custom title bar
         BackColor = Bg;
@@ -186,29 +205,34 @@ public partial class MainForm : Form
         // === Custom Title Bar (for borderless window) ===
         titleBar = new Panel
         {
-            Location = new Point(0, 0),
+            // Initial size matters even when docked: right-anchored children compute
+            // their offsets from it before the first dock layout runs
             Size = new Size(900, 40),
+            Dock = DockStyle.Top,
             BackColor = Bg,
             Cursor = Cursors.Hand
         };
 
-        // Enable window dragging via title bar
+        // Drag to move (native move loop), double-click to maximize/restore,
+        // top band resizes
         titleBar.MouseDown += (s, e) =>
         {
-            if (e.Button == MouseButtons.Left)
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Clicks == 2)
             {
-                isDragging = true;
-                lastMousePosition = e.Location;
+                ToggleMaximize();
+            }
+            else if (e.Y <= 4 && WindowState == FormWindowState.Normal)
+            {
+                StartNativeWindowAction(
+                    e.X < ResizeGrip ? HTTOPLEFT :
+                    e.X >= titleBar.Width - ResizeGrip ? HTTOPRIGHT : HTTOP);
+            }
+            else
+            {
+                StartNativeWindowAction(HTCAPTION);
             }
         };
-        titleBar.MouseMove += (s, e) =>
-        {
-            if (isDragging)
-            {
-                Location = new Point(Location.X + e.X - lastMousePosition.X, Location.Y + e.Y - lastMousePosition.Y);
-            }
-        };
-        titleBar.MouseUp += (s, e) => isDragging = false;
 
         // Title text
         var titleBarTitle = new Label
@@ -220,6 +244,12 @@ public partial class MainForm : Form
             AutoSize = true,
             BackColor = Color.Transparent
         };
+        titleBarTitle.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Clicks == 2) ToggleMaximize();
+            else StartNativeWindowAction(HTCAPTION);
+        };
         titleBar.Controls.Add(titleBarTitle);
 
         // Close button (minimizes to tray)
@@ -227,6 +257,7 @@ public partial class MainForm : Form
         {
             Text = "✕",
             Location = new Point(860, 0),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Size = new Size(40, 40),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.Transparent,
@@ -250,6 +281,7 @@ public partial class MainForm : Form
         {
             Text = "−",
             Location = new Point(820, 0),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Size = new Size(40, 40),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.Transparent,
@@ -273,11 +305,12 @@ public partial class MainForm : Form
         {
             Location = new Point(30, 60),
             Size = new Size(840, 530),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
             BackColor = Color.Transparent
         };
 
         // Source device section label
-        var sourceLabel = new Label
+        sourceLabel = new Label
         {
             Text = "SOURCE DEVICE",
             Font = new Font("Segoe UI", 11f),
@@ -293,6 +326,7 @@ public partial class MainForm : Form
         {
             Location = new Point(0, 30),
             Size = new Size(840, 40),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             BackColor = Surface2,
             ForeColor = Text1,
             Font = new Font("Segoe UI", 10f)
@@ -306,7 +340,7 @@ public partial class MainForm : Form
         container.Controls.Add(sourceCombo);
 
         // Output devices section label
-        var outputsLabel = new Label
+        outputsLabel = new Label
         {
             Text = "OUTPUT DEVICES",
             Font = new Font("Segoe UI", 11f),
@@ -322,12 +356,14 @@ public partial class MainForm : Form
         {
             Location = new Point(0, 120),
             Size = new Size(840, 400),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
             BackColor = Color.Transparent,
             AutoScroll = true,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             Padding = new Padding(0, 0, 10, 0)
         };
+        deviceCardsPanel.Resize += (s, e) => ResizeDeviceCards();
         container.Controls.Add(deviceCardsPanel);
 
         Controls.Add(container);
@@ -335,8 +371,8 @@ public partial class MainForm : Form
         // === Bottom Bar (status and buttons) ===
         var bottomBar = new Panel
         {
-            Location = new Point(0, 600),
             Size = new Size(900, 80),
+            Dock = DockStyle.Bottom,
             BackColor = Bg
         };
 
@@ -344,7 +380,19 @@ public partial class MainForm : Form
         bottomBar.Paint += (s, e) =>
         {
             using var pen = new Pen(BorderSoft, 1);
-            e.Graphics.DrawLine(pen, 0, 0, 900, 0);
+            e.Graphics.DrawLine(pen, 0, 0, bottomBar.Width, 0);
+        };
+
+        // Bottom band of the bar doubles as the window's bottom resize edge
+        bottomBar.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left || WindowState != FormWindowState.Normal) return;
+            if (e.Y >= bottomBar.Height - ResizeGrip)
+            {
+                StartNativeWindowAction(
+                    e.X < ResizeGrip ? HTBOTTOMLEFT :
+                    e.X >= bottomBar.Width - ResizeGrip ? HTBOTTOMRIGHT : HTBOTTOM);
+            }
         };
 
         // Status label
@@ -364,6 +412,7 @@ public partial class MainForm : Form
         {
             Location = new Point(550, 20),
             Size = new Size(320, 45),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             BackColor = Color.Transparent
         };
 
@@ -404,13 +453,19 @@ public partial class MainForm : Form
         Controls.Add(bottomBar);
 
         // === System Tray Configuration ===
+        // Item texts are assigned in ApplyLocalization so they follow language changes
         trayMenu = new ContextMenuStrip();
-        trayMenu.Items.Add(Localization.Get("ShowWindow"), null, (s, e) => { Show(); WindowState = FormWindowState.Normal; });
-        trayMenu.Items.Add(Localization.Get("StartAudio"), null, (s, e) => StartAudio());
-        trayMenu.Items.Add(Localization.Get("StopAudio"), null, (s, e) => StopAudio());
+        trayShowItem = new ToolStripMenuItem("", null, (s, e) => { Show(); WindowState = FormWindowState.Normal; });
+        trayStartItem = new ToolStripMenuItem("", null, (s, e) => StartAudio());
+        trayStopItem = new ToolStripMenuItem("", null, (s, e) => StopAudio());
+        traySettingsItem = new ToolStripMenuItem("", null, (s, e) => ShowSettingsDialog());
+        trayExitItem = new ToolStripMenuItem("", null, (s, e) => Application.Exit());
+        trayMenu.Items.Add(trayShowItem);
+        trayMenu.Items.Add(trayStartItem);
+        trayMenu.Items.Add(trayStopItem);
         trayMenu.Items.Add("-");
-        trayMenu.Items.Add(Localization.Get("Settings"), null, (s, e) => ShowSettingsDialog());
-        trayMenu.Items.Add(Localization.Get("Exit"), null, (s, e) => Application.Exit());
+        trayMenu.Items.Add(traySettingsItem);
+        trayMenu.Items.Add(trayExitItem);
 
         trayIcon = new NotifyIcon
         {
@@ -434,12 +489,37 @@ public partial class MainForm : Form
 
         ResumeLayout(false);
 
+        ApplyLocalization();
+
         // Handle minimized start
         if (startMinimized)
         {
             WindowState = FormWindowState.Minimized;
             Hide();
         }
+    }
+
+    /// <summary>
+    /// Applies the current language to all visible UI text.
+    /// Called at startup and immediately when the user changes the language,
+    /// so no restart is needed.
+    /// </summary>
+    private void ApplyLocalization()
+    {
+        sourceLabel.Text = Localization.Get("SourceDevice").ToUpperInvariant();
+        outputsLabel.Text = Localization.Get("OutputDevices").ToUpperInvariant();
+        startButton.Text = Localization.Get("Start").ToUpperInvariant();
+        stopButton.Text = Localization.Get("Stop");
+
+        trayShowItem.Text = Localization.Get("Show");
+        trayStartItem.Text = Localization.Get("Start");
+        trayStopItem.Text = Localization.Get("Stop");
+        traySettingsItem.Text = Localization.Get("Settings");
+        trayExitItem.Text = Localization.Get("Exit");
+
+        statusLabel.Text = isRunning
+            ? string.Format(Localization.Get("Running"), outputDevices.Count)
+            : Localization.Get("Stopped");
     }
     #endregion
 
@@ -454,6 +534,80 @@ public partial class MainForm : Form
         // Draw subtle border around borderless window
         using var pen = new Pen(BorderSoft, 1);
         e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+    }
+    #endregion
+
+    #region Window Move and Resize
+    /// <summary>
+    /// Hands the mouse interaction to Windows' native move/size loop.
+    /// </summary>
+    /// <param name="hitTest">HT* code describing which window part is being dragged</param>
+    private void StartNativeWindowAction(int hitTest)
+    {
+        ReleaseCapture();
+        SendMessage(Handle, WM_NCLBUTTONDOWN, hitTest, 0);
+    }
+
+    /// <summary>
+    /// Toggles between maximized and normal window state.
+    /// Bounds are capped to the working area so the taskbar stays visible.
+    /// </summary>
+    private void ToggleMaximize()
+    {
+        if (WindowState == FormWindowState.Maximized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+        else
+        {
+            MaximizedBounds = Screen.FromControl(this).WorkingArea;
+            WindowState = FormWindowState.Maximized;
+        }
+    }
+
+    /// <summary>
+    /// Turns the outer band of the (borderless) window into resize edges.
+    /// Only applies where the form itself is under the cursor; the title bar
+    /// and bottom bar handle their own edges via MouseDown.
+    /// </summary>
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCHITTEST = 0x84;
+        const int HTCLIENT = 1;
+
+        base.WndProc(ref m);
+
+        if (m.Msg == WM_NCHITTEST && (int)m.Result == HTCLIENT && WindowState == FormWindowState.Normal)
+        {
+            long lparam = m.LParam.ToInt64();
+            var point = PointToClient(new Point(unchecked((short)lparam), unchecked((short)(lparam >> 16))));
+
+            bool onLeft = point.X < ResizeGrip;
+            bool onRight = point.X >= Width - ResizeGrip;
+            bool onTop = point.Y < ResizeGrip;
+            bool onBottom = point.Y >= Height - ResizeGrip;
+
+            if (onTop && onLeft) m.Result = HTTOPLEFT;
+            else if (onTop && onRight) m.Result = HTTOPRIGHT;
+            else if (onBottom && onLeft) m.Result = HTBOTTOMLEFT;
+            else if (onBottom && onRight) m.Result = HTBOTTOMRIGHT;
+            else if (onLeft) m.Result = HTLEFT;
+            else if (onRight) m.Result = HTRIGHT;
+            else if (onTop) m.Result = HTTOP;
+            else if (onBottom) m.Result = HTBOTTOM;
+        }
+    }
+
+    /// <summary>
+    /// Keeps device cards as wide as the scrollable panel that holds them.
+    /// </summary>
+    private void ResizeDeviceCards()
+    {
+        int width = Math.Max(500, deviceCardsPanel.ClientSize.Width - deviceCardsPanel.Padding.Right);
+        foreach (var card in deviceCards)
+        {
+            card.Width = width;
+        }
     }
     #endregion
 
@@ -576,19 +730,13 @@ public partial class MainForm : Form
 
         using var enumerator = new MMDeviceEnumerator();
 
-        // Source dropdown: Only render (output) devices work with loopback capture
-        // Loopback capture records what's being played to an output device
-        var sourceDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        foreach (var device in sourceDevices)
-        {
-            sourceCombo.Items.Add(new DeviceItem(device));
-        }
-
-        // Output cards: All render devices can be targets
+        // Render (output) devices serve both roles: loopback capture sources
+        // (capture records what's being played to an output) and output targets
         var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
 
         foreach (var device in devices)
         {
+            sourceCombo.Items.Add(new DeviceItem(device));
 
             var card = new DeviceCard(device);
 
@@ -600,16 +748,26 @@ public partial class MainForm : Form
                     card.CustomName = savedDevice.CustomName;
                 card.ChannelMode = savedDevice.ChannelMode;
                 card.IsEnabled = savedDevice.IsSelected;
+                card.Volume = savedDevice.Volume;
             }
 
             // Wire up event handlers
             card.EnabledChanged += (s, e) => SaveDeviceSettings();
             card.ChannelChanged += (s, e) => SaveDeviceSettings();
             card.RenameRequested += (s, e) => RenameDevice(card);
+            card.VolumeChanged += (s, e) =>
+            {
+                // Adjust the live pipeline immediately; persist after the drag settles
+                if (mixersByDeviceId.TryGetValue(card.DeviceId, out var mixer))
+                    mixer.Volume = card.Volume;
+                ScheduleDeviceSettingsSave();
+            };
 
             deviceCards.Add(card);
             deviceCardsPanel.Controls.Add(card);
         }
+
+        ResizeDeviceCards();
 
         // Restore selected source device
         if (!string.IsNullOrEmpty(settings.SourceDeviceId))
@@ -628,7 +786,7 @@ public partial class MainForm : Form
         if (sourceCombo.SelectedIndex == -1 && sourceCombo.Items.Count > 0)
             sourceCombo.SelectedIndex = 0;
 
-        statusLabel.Text = $"{devices.Count} devices found";
+        statusLabel.Text = string.Format(Localization.Get("FoundDevices"), devices.Count);
     }
 
     /// <summary>
@@ -645,10 +803,30 @@ public partial class MainForm : Form
                 DeviceId = card.DeviceId,
                 CustomName = card.CustomName,
                 ChannelMode = card.ChannelMode,
-                IsSelected = card.IsEnabled
+                IsSelected = card.IsEnabled,
+                Volume = card.Volume
             });
         }
         settings.Save();
+    }
+
+    /// <summary>
+    /// Saves device settings after a short delay, restarting the delay on each call.
+    /// Prevents a file write per pixel while a volume slider is being dragged.
+    /// </summary>
+    private void ScheduleDeviceSettingsSave()
+    {
+        if (settingsSaveTimer == null)
+        {
+            settingsSaveTimer = new System.Windows.Forms.Timer { Interval = 400 };
+            settingsSaveTimer.Tick += (s, e) =>
+            {
+                settingsSaveTimer!.Stop();
+                SaveDeviceSettings();
+            };
+        }
+        settingsSaveTimer.Stop();
+        settingsSaveTimer.Start();
     }
 
     /// <summary>
@@ -664,7 +842,7 @@ public partial class MainForm : Form
     /// </summary>
     private void RenameDevice(DeviceCard card)
     {
-        var dialog = new InputDialog("Rename Device", "Enter new name:", card.CustomName);
+        var dialog = new InputDialog(Localization.Get("RenameDevice"), Localization.Get("EnterNewName"), card.CustomName);
         if (dialog.ShowDialog() == DialogResult.OK)
         {
             card.CustomName = dialog.InputText;
@@ -719,13 +897,13 @@ public partial class MainForm : Form
         var selectedCards = deviceCards.Where(c => c.IsEnabled).ToList();
         if (selectedCards.Count == 0)
         {
-            MessageBox.Show(Localization.Get("NoDevicesSelected"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(Localization.Get("SelectDevice"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         if (sourceCombo.SelectedItem is not DeviceItem sourceItem)
         {
-            MessageBox.Show(Localization.Get("NoSourceSelected"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(Localization.Get("SelectSource"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -756,11 +934,12 @@ public partial class MainForm : Form
                 // Parameters: device, share mode, event callback mode, latency in ms
                 var output = new WasapiOut(outputDevice, AudioClientShareMode.Shared, true, 15);
 
-                // ChannelMixingProvider: Buffers audio and applies channel mixing
-                var mixer = new ChannelMixingProvider(loopbackCapture.WaveFormat, card.ChannelMode);
+                // ChannelMixingProvider: Buffers audio, applies channel mixing and volume
+                var mixer = new ChannelMixingProvider(loopbackCapture.WaveFormat, card.ChannelMode, card.Volume);
 
                 outputDevices.Add(output);
                 mixers.Add(mixer);
+                mixersByDeviceId[card.DeviceId] = mixer;
             }
 
             // Handle case where no valid outputs after filtering
@@ -768,14 +947,18 @@ public partial class MainForm : Form
             {
                 loopbackCapture?.Dispose();
                 loopbackCapture = null;
-                MessageBox.Show(Localization.Get("NoValidOutputs"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(Localization.Get("SelectDevice"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // Wire up audio data flow: source -> all mixers
+            // Wire up audio data flow: source -> all mixers.
+            // Snapshot the mixer list: DataAvailable fires on the capture thread,
+            // while StopAudio clears the list on the UI thread. Iterating the
+            // snapshot avoids a race on the shared list.
+            var activeMixers = mixers.ToArray();
             loopbackCapture.DataAvailable += (s, e) =>
             {
-                foreach (var mixer in mixers)
+                foreach (var mixer in activeMixers)
                 {
                     mixer.AddSamples(e.Buffer, 0, e.BytesRecorded);
                 }
@@ -795,14 +978,15 @@ public partial class MainForm : Form
             isRunning = true;
             startButton.Visible = false;
             stopButton.Visible = true;
-            statusLabel.Text = $"Playing on {outputDevices.Count} device(s)";
+            statusLabel.Text = string.Format(Localization.Get("Running"), outputDevices.Count);
             statusLabel.ForeColor = Accent;
 
             trayIcon.Text = "Multi Audio Output - Running";
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Error starting audio: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Logger.Log("Failed to start audio routing", ex);
+            MessageBox.Show(string.Format(Localization.Get("CouldNotStart"), ex.Message), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             StopAudio();
         }
     }
@@ -827,17 +1011,21 @@ public partial class MainForm : Form
             }
             outputDevices.Clear();
             mixers.Clear();
+            mixersByDeviceId.Clear();
 
             // Update UI state
             isRunning = false;
             stopButton.Visible = false;
             startButton.Visible = true;
-            statusLabel.Text = "Ready";
+            statusLabel.Text = Localization.Get("Stopped");
             statusLabel.ForeColor = Text2;
 
             trayIcon.Text = "Multi Audio Output";
         }
-        catch { /* Ignore cleanup errors */ }
+        catch (Exception ex)
+        {
+            Logger.Log("Error while stopping audio", ex);
+        }
     }
 
     /// <summary>
@@ -901,8 +1089,22 @@ public partial class MainForm : Form
 
                     if (device == null) continue;
 
+                    // Respect the per-device volume by scaling the tone itself.
+                    // (WasapiOut.Volume would change the Windows endpoint volume
+                    // for the device, which must not be touched.)
+                    var deviceBuffer = buffer;
+                    if (card.Volume < 1f)
+                    {
+                        deviceBuffer = new byte[buffer.Length];
+                        for (int i = 0; i < buffer.Length; i += 2)
+                        {
+                            short sample = (short)(BitConverter.ToInt16(buffer, i) * card.Volume);
+                            BitConverter.TryWriteBytes(deviceBuffer.AsSpan(i, 2), sample);
+                        }
+                    }
+
                     var output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
-                    var stream = new MemoryStream(buffer, writable: false);
+                    var stream = new MemoryStream(deviceBuffer, writable: false);
                     var provider = new RawSourceWaveStream(stream, waveFormat);
                     output.Init(provider);
                     testStreams.Add(provider);
@@ -936,7 +1138,9 @@ public partial class MainForm : Form
                 // Restore status label on UI thread
                 this.Invoke(() =>
                 {
-                    statusLabel.Text = isRunning ? $"Playing on {outputDevices.Count} device(s)" : "Ready";
+                    statusLabel.Text = isRunning
+                        ? string.Format(Localization.Get("Running"), outputDevices.Count)
+                        : Localization.Get("Stopped");
                     statusLabel.ForeColor = isRunning ? Accent : Text2;
                 });
             }
@@ -961,8 +1165,9 @@ public partial class MainForm : Form
             settings.SetStartWithWindows(settings.StartWithWindows);
             settings.Save();
 
+            // Re-apply UI text in the new language immediately - no restart needed
             Localization.SetLanguage(settings.Language);
-            MessageBox.Show(Localization.Get("RestartRequired"), "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ApplyLocalization();
         }
     }
     #endregion
@@ -981,7 +1186,10 @@ public partial class MainForm : Form
                 return new Icon(iconPath);
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Log("Failed to load tray icon, using system default", ex);
+        }
 
         // Fallback to default system icon
         return SystemIcons.Application;
@@ -996,8 +1204,15 @@ public partial class MainForm : Form
     {
         if (disposing)
         {
-            pulseTimer?.Stop();
-            pulseTimer?.Dispose();
+            // Flush a pending debounced save so a volume change right before
+            // exit still reaches settings.json
+            if (settingsSaveTimer != null)
+            {
+                bool savePending = settingsSaveTimer.Enabled;
+                settingsSaveTimer.Stop();
+                settingsSaveTimer.Dispose();
+                if (savePending) SaveDeviceSettings();
+            }
             StopAudio();
             trayIcon?.Dispose();
         }
@@ -1032,6 +1247,8 @@ class DeviceCard : Panel
     private readonly CustomDropdown channelCombo;
     private readonly Button renameButton;
     private readonly ToolTip deviceTooltip;
+    private readonly VolumeSlider volumeSlider;
+    private readonly Label volumeLabel;
 
     // State
     private int channelMode;
@@ -1072,10 +1289,18 @@ class DeviceCard : Panel
         set => enableCheckbox.Checked = value;
     }
 
+    /// <summary>Per-device output volume (0.0 - 1.0)</summary>
+    public float Volume
+    {
+        get => volumeSlider.Value / 100f;
+        set => volumeSlider.Value = (int)Math.Round(Math.Clamp(value, 0f, 1f) * 100);
+    }
+
     // Events
     public new event EventHandler? EnabledChanged;
     public event EventHandler? ChannelChanged;
     public event EventHandler? RenameRequested;
+    public event EventHandler? VolumeChanged;
 
     /// <summary>
     /// Creates a new device card for the specified audio device.
@@ -1211,14 +1436,42 @@ class DeviceCard : Panel
             Font = new Font("Segoe UI", 13, FontStyle.Bold),
             ForeColor = Text1,
             Location = new Point(95, 10),
-            Size = new Size(540, 48),
+            Size = new Size(370, 48),
             BackColor = Color.Transparent,
             AutoSize = false,
-            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
             UseMnemonic = false
         };
         Controls.Add(nameLabel);
         PropagateHover(nameLabel);
+
+        // Per-device volume slider with percentage readout
+        volumeSlider = new VolumeSlider
+        {
+            Location = new Point(478, 27),
+            Size = new Size(120, 16),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        volumeLabel = new Label
+        {
+            Text = "100%",
+            Font = new Font("Segoe UI", 9),
+            ForeColor = Text3,
+            Location = new Point(602, 25),
+            Size = new Size(42, 20),
+            BackColor = Color.Transparent,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        volumeSlider.ValueChanged += (s, e) =>
+        {
+            volumeLabel.Text = $"{volumeSlider.Value}%";
+            VolumeChanged?.Invoke(this, EventArgs.Empty);
+        };
+        Controls.Add(volumeSlider);
+        Controls.Add(volumeLabel);
+        PropagateHover(volumeSlider);
+        PropagateHover(volumeLabel);
 
         // Channel mode dropdown
         channelCombo = new CustomDropdown
@@ -1346,19 +1599,6 @@ class DeviceCard : Panel
         if (name.Contains("monitor") || name.Contains("display")) return "🖥️";
         return "🔈";
     }
-
-    /// <summary>
-    /// Returns a human-readable device type description.
-    /// </summary>
-    private string GetDeviceType(MMDevice device)
-    {
-        var name = device.FriendlyName.ToLower();
-        if (name.Contains("headphone")) return "Headphones";
-        if (name.Contains("speaker")) return "Speakers";
-        if (name.Contains("monitor") || name.Contains("display")) return "Monitor Audio";
-        if (name.Contains("hdmi") || name.Contains("displayport")) return "Display Audio";
-        return "Audio Device";
-    }
 }
 #endregion
 
@@ -1458,7 +1698,7 @@ class SettingsDialog : Form
         // OK button
         var okBtn = new Button
         {
-            Text = "OK",
+            Text = Localization.Get("Save"),
             Location = new Point(240, 310),
             Size = new Size(80, 35),
             DialogResult = DialogResult.OK,
@@ -1472,7 +1712,7 @@ class SettingsDialog : Form
         // Cancel button
         var cancelBtn = new Button
         {
-            Text = "Cancel",
+            Text = Localization.Get("Cancel"),
             Location = new Point(330, 310),
             Size = new Size(80, 35),
             DialogResult = DialogResult.Cancel,
@@ -1545,7 +1785,7 @@ class InputDialog : Form
 
         var cancelBtn = new Button
         {
-            Text = "Cancel",
+            Text = Localization.Get("Cancel"),
             Location = new Point(285, 110),
             Size = new Size(75, 30),
             DialogResult = DialogResult.Cancel,
@@ -1771,6 +2011,104 @@ class CustomDropdown : Panel
 }
 #endregion
 
+#region Volume Slider
+/// <summary>
+/// A minimal custom-drawn horizontal slider (0-100) matching the dark theme.
+/// Used for per-device volume on device cards.
+/// </summary>
+class VolumeSlider : Control
+{
+    private static readonly Color Track = Color.FromArgb(40, 255, 255, 255);
+    private static readonly Color Fill = Color.FromArgb(43, 217, 127);
+    private static readonly Color Thumb = Color.FromArgb(234, 234, 234);
+    private const int ThumbRadius = 6;
+
+    private int sliderValue = 100;
+    private bool dragging;
+
+    public event EventHandler? ValueChanged;
+
+    /// <summary>Slider position, clamped to 0-100.</summary>
+    public int Value
+    {
+        get => sliderValue;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (clamped != sliderValue)
+            {
+                sliderValue = clamped;
+                Invalidate();
+                ValueChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    public VolumeSlider()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        Size = new Size(120, 16);
+    }
+
+    private void SetValueFromMouse(int x)
+    {
+        int trackWidth = Math.Max(1, Width - ThumbRadius * 2);
+        Value = (int)Math.Round(100.0 * (x - ThumbRadius) / trackWidth);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Left)
+        {
+            dragging = true;
+            SetValueFromMouse(e.X);
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (dragging) SetValueFromMouse(e.X);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        dragging = false;
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        Value += Math.Sign(e.Delta) * 5;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+        int trackY = Height / 2 - 2;
+        int trackWidth = Width - ThumbRadius * 2;
+        int fillWidth = (int)(trackWidth * sliderValue / 100.0);
+
+        using (var brush = new SolidBrush(Track))
+            e.Graphics.FillRectangle(brush, ThumbRadius, trackY, trackWidth, 4);
+
+        using (var brush = new SolidBrush(Fill))
+            e.Graphics.FillRectangle(brush, ThumbRadius, trackY, fillWidth, 4);
+
+        using (var brush = new SolidBrush(Thumb))
+            e.Graphics.FillEllipse(brush, fillWidth, Height / 2 - ThumbRadius, ThumbRadius * 2, ThumbRadius * 2);
+    }
+}
+#endregion
+
 #region Helper Classes
 /// <summary>
 /// Wrapper for MMDevice to display friendly name in dropdowns.
@@ -1816,16 +2154,29 @@ class ChannelMixingProvider : IWaveProvider
     private readonly BufferedWaveProvider bufferedProvider;
     private readonly int channelMode;
 
+    // Per-device gain, read on the playback thread while the UI thread writes it.
+    // Plain float reads/writes are atomic, so no lock is needed.
+    private float volume;
+
     public WaveFormat WaveFormat => bufferedProvider.WaveFormat;
+
+    /// <summary>Per-device output volume (0.0 - 1.0). Safe to change during playback.</summary>
+    public float Volume
+    {
+        get => volume;
+        set => volume = Math.Clamp(value, 0f, 1f);
+    }
 
     /// <summary>
     /// Creates a new channel mixing provider.
     /// </summary>
     /// <param name="sourceFormat">Audio format from the source</param>
     /// <param name="mode">Channel mixing mode (0-9)</param>
-    public ChannelMixingProvider(WaveFormat sourceFormat, int mode)
+    /// <param name="initialVolume">Initial per-device volume (0.0 - 1.0)</param>
+    public ChannelMixingProvider(WaveFormat sourceFormat, int mode, float initialVolume = 1f)
     {
         channelMode = mode;
+        volume = Math.Clamp(initialVolume, 0f, 1f);
         bufferedProvider = new BufferedWaveProvider(sourceFormat)
         {
             // Discard old audio when buffer is full - prevents latency buildup
@@ -1857,8 +2208,8 @@ class ChannelMixingProvider : IWaveProvider
             Array.Clear(outBuffer, offset + read, count - read);
         }
 
-        // Apply channel mixing if not in stereo pass-through mode
-        if (channelMode > 0 && bufferedProvider.WaveFormat.Channels == 2 && read > 0)
+        // Apply channel mixing and/or per-device volume
+        if ((channelMode > 0 || volume < 1f) && bufferedProvider.WaveFormat.Channels == 2 && read > 0)
         {
             ApplyChannelMixing(outBuffer, offset, read);
         }
@@ -1867,75 +2218,86 @@ class ChannelMixingProvider : IWaveProvider
     }
 
     /// <summary>
-    /// Applies the selected channel mixing mode to the audio buffer.
-    /// Operates on 16-bit stereo samples (4 bytes per sample pair).
+    /// Applies the selected channel mixing mode and per-device volume to the buffer.
+    /// Supports 32-bit IEEE float stereo (the format WASAPI loopback capture
+    /// delivers in shared mode) as well as 16-bit PCM stereo.
     /// </summary>
     private void ApplyChannelMixing(byte[] buffer, int offset, int count)
     {
-        int bytesPerSample = bufferedProvider.WaveFormat.BitsPerSample / 8;
+        var format = bufferedProvider.WaveFormat;
+        bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32;
+        bool isPcm16 = format.Encoding == WaveFormatEncoding.Pcm && format.BitsPerSample == 16;
+        if (!isFloat && !isPcm16)
+            return;
+
+        int bytesPerSample = format.BitsPerSample / 8;
         int samplePairs = count / (bytesPerSample * 2);
+
+        // Snapshot the volume once per buffer so the whole block gets a consistent gain
+        float gain = volume;
 
         for (int i = 0; i < samplePairs; i++)
         {
             int leftIndex = offset + (i * bytesPerSample * 2);
             int rightIndex = leftIndex + bytesPerSample;
 
+            // Normalize both samples to float [-1, 1] so all modes share one code path
+            float left = isFloat
+                ? BitConverter.ToSingle(buffer, leftIndex)
+                : BitConverter.ToInt16(buffer, leftIndex) / 32768f;
+            float right = isFloat
+                ? BitConverter.ToSingle(buffer, rightIndex)
+                : BitConverter.ToInt16(buffer, rightIndex) / 32768f;
+
+            float outLeft, outRight;
             switch (channelMode)
             {
-                case 1: // Left - copy left channel to right
+                case 1: // Left - left channel to both outputs
                 case 4: // Front Left
-                    Array.Copy(buffer, leftIndex, buffer, rightIndex, bytesPerSample);
+                    outLeft = outRight = left;
                     break;
-
-                case 2: // Right - copy right channel to left
+                case 2: // Right - right channel to both outputs
                 case 5: // Front Right
-                    Array.Copy(buffer, rightIndex, buffer, leftIndex, bytesPerSample);
+                    outLeft = outRight = right;
                     break;
-
                 case 3: // Center/Mono - mix both channels
                 case 8: // Back/Surround
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        short mono = (short)((left + right) / 2);
-                        Array.Copy(BitConverter.GetBytes(mono), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(mono), 0, buffer, rightIndex, 2);
-                    }
+                    outLeft = outRight = (left + right) * 0.5f;
                     break;
-
                 case 6: // Back Left - left channel at reduced volume
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short reduced = (short)(left * 0.85);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, rightIndex, 2);
-                    }
+                    outLeft = outRight = left * 0.85f;
                     break;
-
                 case 7: // Back Right - right channel at reduced volume
-                    if (bytesPerSample == 2)
-                    {
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        short reduced = (short)(right * 0.85);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, rightIndex, 2);
-                    }
+                    outLeft = outRight = right * 0.85f;
                     break;
-
-                case 9: // Subwoofer/LFE - mono with bass boost
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        // Mix to mono and apply 1.3x gain for bass emphasis
-                        short bass = (short)(((left + right) / 2) * 1.3);
-                        Array.Copy(BitConverter.GetBytes(bass), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(bass), 0, buffer, rightIndex, 2);
-                    }
+                case 9: // Subwoofer/LFE - mono with bass emphasis
+                    outLeft = outRight = (left + right) * 0.5f * 1.3f;
+                    break;
+                default: // Stereo pass-through (only reached when applying volume)
+                    outLeft = left;
+                    outRight = right;
                     break;
             }
+
+            WriteSample(buffer, leftIndex, outLeft * gain, isFloat);
+            WriteSample(buffer, rightIndex, outRight * gain, isFloat);
+        }
+    }
+
+    /// <summary>
+    /// Writes a normalized float sample back to the buffer, clamping to avoid
+    /// wrap-around distortion when gain pushes a sample past full scale.
+    /// </summary>
+    private static void WriteSample(byte[] buffer, int index, float value, bool isFloat)
+    {
+        if (isFloat)
+        {
+            BitConverter.TryWriteBytes(buffer.AsSpan(index, 4), Math.Clamp(value, -1f, 1f));
+        }
+        else
+        {
+            short pcm = (short)Math.Clamp(value * 32768f, short.MinValue, short.MaxValue);
+            BitConverter.TryWriteBytes(buffer.AsSpan(index, 2), pcm);
         }
     }
 }

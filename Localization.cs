@@ -37,6 +37,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Source (audio to duplicate):",
+            ["SourceDevice"] = "Source device",
+            ["OutputDevices"] = "Output devices",
             ["SelectOutputs"] = "Select outputs and channel (right-click to set channel):",
             ["Device"] = "Device",
             ["Channel"] = "Channel",
@@ -88,6 +90,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Källa (ljud att duplicera):",
+            ["SourceDevice"] = "Källenhet",
+            ["OutputDevices"] = "Utgångsenheter",
             ["SelectOutputs"] = "Välj utgångar och kanal (högerklicka för att välja kanal):",
             ["Device"] = "Enhet",
             ["Channel"] = "Kanal",
@@ -139,6 +143,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Quelle (zu duplizierendes Audio):",
+            ["SourceDevice"] = "Quellgerät",
+            ["OutputDevices"] = "Ausgabegeräte",
             ["SelectOutputs"] = "Ausgänge und Kanal wählen (Rechtsklick für Kanal):",
             ["Device"] = "Gerät",
             ["Channel"] = "Kanal",
@@ -190,6 +196,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Fuente (audio a duplicar):",
+            ["SourceDevice"] = "Dispositivo de origen",
+            ["OutputDevices"] = "Dispositivos de salida",
             ["SelectOutputs"] = "Seleccionar salidas y canal (clic derecho para canal):",
             ["Device"] = "Dispositivo",
             ["Channel"] = "Canal",
@@ -241,6 +249,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Source (audio à dupliquer):",
+            ["SourceDevice"] = "Périphérique source",
+            ["OutputDevices"] = "Périphériques de sortie",
             ["SelectOutputs"] = "Sélectionner sorties et canal (clic droit pour canal):",
             ["Device"] = "Appareil",
             ["Channel"] = "Canal",
@@ -292,6 +302,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Fonte (áudio a duplicar):",
+            ["SourceDevice"] = "Dispositivo de origem",
+            ["OutputDevices"] = "Dispositivos de saída",
             ["SelectOutputs"] = "Selecionar saídas e canal (clique direito para canal):",
             ["Device"] = "Dispositivo",
             ["Channel"] = "Canal",
@@ -343,6 +355,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Lydutgang",
             ["Source"] = "Kilde (lyd å duplisere):",
+            ["SourceDevice"] = "Kildeenhet",
+            ["OutputDevices"] = "Utgangsenheter",
             ["SelectOutputs"] = "Velg utganger og kanal (høyreklikk for kanal):",
             ["Device"] = "Enhet",
             ["Channel"] = "Kanal",
@@ -394,6 +408,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Lydudgang",
             ["Source"] = "Kilde (lyd at duplikere):",
+            ["SourceDevice"] = "Kildeenhed",
+            ["OutputDevices"] = "Udgangsenheder",
             ["SelectOutputs"] = "Vælg udgange og kanal (højreklik for kanal):",
             ["Device"] = "Enhed",
             ["Channel"] = "Kanal",
@@ -445,6 +461,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Äänilähtö",
             ["Source"] = "Lähde (monistettava ääni):",
+            ["SourceDevice"] = "Lähdelaite",
+            ["OutputDevices"] = "Lähtölaitteet",
             ["SelectOutputs"] = "Valitse lähdöt ja kanava (oikea klikkaus kanavalle):",
             ["Device"] = "Laite",
             ["Channel"] = "Kanava",
@@ -496,6 +514,8 @@ public static class Localization
         {
             ["AppTitle"] = "Мулти Аудио Излаз",
             ["Source"] = "Извор (аудио за дуплирање):",
+            ["SourceDevice"] = "Изворни уређај",
+            ["OutputDevices"] = "Излазни уређаји",
             ["SelectOutputs"] = "Изабери излазе и канал (десни клик за канал):",
             ["Device"] = "Уређај",
             ["Channel"] = "Канал",
@@ -547,6 +567,8 @@ public static class Localization
         {
             ["AppTitle"] = "إخراج صوتي متعدد",
             ["Source"] = "المصدر (الصوت المراد تكراره):",
+            ["SourceDevice"] = "جهاز المصدر",
+            ["OutputDevices"] = "أجهزة الإخراج",
             ["SelectOutputs"] = "حدد المخرجات والقناة (انقر بزر الماوس الأيمن للقناة):",
             ["Device"] = "الجهاز",
             ["Channel"] = "القناة",
@@ -598,6 +620,8 @@ public static class Localization
         {
             ["AppTitle"] = "मल्टी ऑडियो आउटपुट",
             ["Source"] = "स्रोत (डुप्लिकेट करने के लिए ऑडियो):",
+            ["SourceDevice"] = "स्रोत डिवाइस",
+            ["OutputDevices"] = "आउटपुट डिवाइस",
             ["SelectOutputs"] = "आउटपुट और चैनल चुनें (चैनल के लिए राइट-क्लिक):",
             ["Device"] = "डिवाइस",
             ["Channel"] = "चैनल",
@@ -649,6 +673,8 @@ public static class Localization
         {
             ["AppTitle"] = "মাল্টি অডিও আউটপুট",
             ["Source"] = "উৎস (ডুপ্লিকেট করার জন্য অডিও):",
+            ["SourceDevice"] = "উৎস ডিভাইস",
+            ["OutputDevices"] = "আউটপুট ডিভাইস",
             ["SelectOutputs"] = "আউটপুট এবং চ্যানেল নির্বাচন করুন (চ্যানেলের জন্য ডান-ক্লিক):",
             ["Device"] = "ডিভাইস",
             ["Channel"] = "চ্যানেল",
@@ -700,6 +726,8 @@ public static class Localization
         {
             ["AppTitle"] = "ملٹی آڈیو آؤٹ پٹ",
             ["Source"] = "ذریعہ (ڈپلیکیٹ کرنے کے لیے آڈیو):",
+            ["SourceDevice"] = "ماخذ ڈیوائس",
+            ["OutputDevices"] = "آؤٹ پٹ ڈیوائسز",
             ["SelectOutputs"] = "آؤٹ پٹ اور چینل منتخب کریں (چینل کے لیے دائیں کلک):",
             ["Device"] = "ڈیوائس",
             ["Channel"] = "چینل",
@@ -751,6 +779,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Источник (аудио для дублирования):",
+            ["SourceDevice"] = "Устройство-источник",
+            ["OutputDevices"] = "Устройства вывода",
             ["SelectOutputs"] = "Выберите выходы и канал (правая кнопка для канала):",
             ["Device"] = "Устройство",
             ["Channel"] = "Канал",
@@ -802,6 +832,8 @@ public static class Localization
         {
             ["AppTitle"] = "マルチオーディオ出力",
             ["Source"] = "ソース（複製するオーディオ）：",
+            ["SourceDevice"] = "ソースデバイス",
+            ["OutputDevices"] = "出力デバイス",
             ["SelectOutputs"] = "出力とチャンネルを選択（チャンネルは右クリック）：",
             ["Device"] = "デバイス",
             ["Channel"] = "チャンネル",
@@ -853,6 +885,8 @@ public static class Localization
         {
             ["AppTitle"] = "多音频输出",
             ["Source"] = "源（要复制的音频）：",
+            ["SourceDevice"] = "源设备",
+            ["OutputDevices"] = "输出设备",
             ["SelectOutputs"] = "选择输出和声道（右键单击选择声道）：",
             ["Device"] = "设备",
             ["Channel"] = "声道",
@@ -904,6 +938,8 @@ public static class Localization
         {
             ["AppTitle"] = "멀티 오디오 출력",
             ["Source"] = "소스 (복제할 오디오):",
+            ["SourceDevice"] = "소스 장치",
+            ["OutputDevices"] = "출력 장치",
             ["SelectOutputs"] = "출력 및 채널 선택 (채널은 오른쪽 클릭):",
             ["Device"] = "장치",
             ["Channel"] = "채널",
@@ -955,6 +991,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Джерело (аудіо для дублювання):",
+            ["SourceDevice"] = "Пристрій-джерело",
+            ["OutputDevices"] = "Пристрої виведення",
             ["SelectOutputs"] = "Виберіть виходи та канал (правий клік для каналу):",
             ["Device"] = "Пристрій",
             ["Channel"] = "Канал",
@@ -1006,6 +1044,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Sorgente (audio da duplicare):",
+            ["SourceDevice"] = "Dispositivo di origine",
+            ["OutputDevices"] = "Dispositivi di uscita",
             ["SelectOutputs"] = "Seleziona uscite e canale (clic destro per canale):",
             ["Device"] = "Dispositivo",
             ["Channel"] = "Canale",
@@ -1057,6 +1097,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Bron (audio om te dupliceren):",
+            ["SourceDevice"] = "Bronapparaat",
+            ["OutputDevices"] = "Uitvoerapparaten",
             ["SelectOutputs"] = "Selecteer uitgangen en kanaal (rechts klikken voor kanaal):",
             ["Device"] = "Apparaat",
             ["Channel"] = "Kanaal",
@@ -1108,6 +1150,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Źródło (audio do duplikowania):",
+            ["SourceDevice"] = "Urządzenie źródłowe",
+            ["OutputDevices"] = "Urządzenia wyjściowe",
             ["SelectOutputs"] = "Wybierz wyjścia i kanał (prawy klik dla kanału):",
             ["Device"] = "Urządzenie",
             ["Channel"] = "Kanał",
@@ -1159,6 +1203,8 @@ public static class Localization
         {
             ["AppTitle"] = "Multi Audio Output",
             ["Source"] = "Kaynak (çoğaltılacak ses):",
+            ["SourceDevice"] = "Kaynak cihaz",
+            ["OutputDevices"] = "Çıkış cihazları",
             ["SelectOutputs"] = "Çıkışları ve kanalı seçin (kanal için sağ tıklayın):",
             ["Device"] = "Cihaz",
             ["Channel"] = "Kanal",
