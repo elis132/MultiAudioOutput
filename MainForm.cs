@@ -1089,11 +1089,24 @@ public partial class MainForm : Form
 
                     if (device == null) continue;
 
+                    // Respect the per-device volume by scaling the tone itself.
+                    // (WasapiOut.Volume would change the Windows endpoint volume
+                    // for the device, which must not be touched.)
+                    var deviceBuffer = buffer;
+                    if (card.Volume < 1f)
+                    {
+                        deviceBuffer = new byte[buffer.Length];
+                        for (int i = 0; i < buffer.Length; i += 2)
+                        {
+                            short sample = (short)(BitConverter.ToInt16(buffer, i) * card.Volume);
+                            BitConverter.TryWriteBytes(deviceBuffer.AsSpan(i, 2), sample);
+                        }
+                    }
+
                     var output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
-                    var stream = new MemoryStream(buffer, writable: false);
+                    var stream = new MemoryStream(deviceBuffer, writable: false);
                     var provider = new RawSourceWaveStream(stream, waveFormat);
                     output.Init(provider);
-                    output.Volume = card.Volume;  // Respect the per-device volume
                     testStreams.Add(provider);
                     testStreams.Add(stream);
                     testOutputs.Add(output);
@@ -1191,8 +1204,15 @@ public partial class MainForm : Form
     {
         if (disposing)
         {
-            settingsSaveTimer?.Stop();
-            settingsSaveTimer?.Dispose();
+            // Flush a pending debounced save so a volume change right before
+            // exit still reaches settings.json
+            if (settingsSaveTimer != null)
+            {
+                bool savePending = settingsSaveTimer.Enabled;
+                settingsSaveTimer.Stop();
+                settingsSaveTimer.Dispose();
+                if (savePending) SaveDeviceSettings();
+            }
             StopAudio();
             trayIcon?.Dispose();
         }
