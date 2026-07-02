@@ -66,7 +66,11 @@ public partial class MainForm : Form
     private WasapiLoopbackCapture? loopbackCapture;                  // Captures audio from source device
     private readonly List<WasapiOut> outputDevices = new();          // Active output device instances
     private readonly List<ChannelMixingProvider> mixers = new();     // Audio processors for each output
+    private readonly Dictionary<string, ChannelMixingProvider> mixersByDeviceId = new(); // For live volume changes
     private bool isRunning = false;                                   // Whether audio routing is active
+
+    // Debounces settings writes while a volume slider is being dragged
+    private System.Windows.Forms.Timer? settingsSaveTimer;
     #endregion
 
     #region Settings and State
@@ -744,12 +748,20 @@ public partial class MainForm : Form
                     card.CustomName = savedDevice.CustomName;
                 card.ChannelMode = savedDevice.ChannelMode;
                 card.IsEnabled = savedDevice.IsSelected;
+                card.Volume = savedDevice.Volume;
             }
 
             // Wire up event handlers
             card.EnabledChanged += (s, e) => SaveDeviceSettings();
             card.ChannelChanged += (s, e) => SaveDeviceSettings();
             card.RenameRequested += (s, e) => RenameDevice(card);
+            card.VolumeChanged += (s, e) =>
+            {
+                // Adjust the live pipeline immediately; persist after the drag settles
+                if (mixersByDeviceId.TryGetValue(card.DeviceId, out var mixer))
+                    mixer.Volume = card.Volume;
+                ScheduleDeviceSettingsSave();
+            };
 
             deviceCards.Add(card);
             deviceCardsPanel.Controls.Add(card);
@@ -791,10 +803,30 @@ public partial class MainForm : Form
                 DeviceId = card.DeviceId,
                 CustomName = card.CustomName,
                 ChannelMode = card.ChannelMode,
-                IsSelected = card.IsEnabled
+                IsSelected = card.IsEnabled,
+                Volume = card.Volume
             });
         }
         settings.Save();
+    }
+
+    /// <summary>
+    /// Saves device settings after a short delay, restarting the delay on each call.
+    /// Prevents a file write per pixel while a volume slider is being dragged.
+    /// </summary>
+    private void ScheduleDeviceSettingsSave()
+    {
+        if (settingsSaveTimer == null)
+        {
+            settingsSaveTimer = new System.Windows.Forms.Timer { Interval = 400 };
+            settingsSaveTimer.Tick += (s, e) =>
+            {
+                settingsSaveTimer!.Stop();
+                SaveDeviceSettings();
+            };
+        }
+        settingsSaveTimer.Stop();
+        settingsSaveTimer.Start();
     }
 
     /// <summary>
@@ -902,11 +934,12 @@ public partial class MainForm : Form
                 // Parameters: device, share mode, event callback mode, latency in ms
                 var output = new WasapiOut(outputDevice, AudioClientShareMode.Shared, true, 15);
 
-                // ChannelMixingProvider: Buffers audio and applies channel mixing
-                var mixer = new ChannelMixingProvider(loopbackCapture.WaveFormat, card.ChannelMode);
+                // ChannelMixingProvider: Buffers audio, applies channel mixing and volume
+                var mixer = new ChannelMixingProvider(loopbackCapture.WaveFormat, card.ChannelMode, card.Volume);
 
                 outputDevices.Add(output);
                 mixers.Add(mixer);
+                mixersByDeviceId[card.DeviceId] = mixer;
             }
 
             // Handle case where no valid outputs after filtering
@@ -978,6 +1011,7 @@ public partial class MainForm : Form
             }
             outputDevices.Clear();
             mixers.Clear();
+            mixersByDeviceId.Clear();
 
             // Update UI state
             isRunning = false;
@@ -1059,6 +1093,7 @@ public partial class MainForm : Form
                     var stream = new MemoryStream(buffer, writable: false);
                     var provider = new RawSourceWaveStream(stream, waveFormat);
                     output.Init(provider);
+                    output.Volume = card.Volume;  // Respect the per-device volume
                     testStreams.Add(provider);
                     testStreams.Add(stream);
                     testOutputs.Add(output);
@@ -1156,6 +1191,8 @@ public partial class MainForm : Form
     {
         if (disposing)
         {
+            settingsSaveTimer?.Stop();
+            settingsSaveTimer?.Dispose();
             StopAudio();
             trayIcon?.Dispose();
         }
@@ -1190,6 +1227,8 @@ class DeviceCard : Panel
     private readonly CustomDropdown channelCombo;
     private readonly Button renameButton;
     private readonly ToolTip deviceTooltip;
+    private readonly VolumeSlider volumeSlider;
+    private readonly Label volumeLabel;
 
     // State
     private int channelMode;
@@ -1230,10 +1269,18 @@ class DeviceCard : Panel
         set => enableCheckbox.Checked = value;
     }
 
+    /// <summary>Per-device output volume (0.0 - 1.0)</summary>
+    public float Volume
+    {
+        get => volumeSlider.Value / 100f;
+        set => volumeSlider.Value = (int)Math.Round(Math.Clamp(value, 0f, 1f) * 100);
+    }
+
     // Events
     public new event EventHandler? EnabledChanged;
     public event EventHandler? ChannelChanged;
     public event EventHandler? RenameRequested;
+    public event EventHandler? VolumeChanged;
 
     /// <summary>
     /// Creates a new device card for the specified audio device.
@@ -1369,7 +1416,7 @@ class DeviceCard : Panel
             Font = new Font("Segoe UI", 13, FontStyle.Bold),
             ForeColor = Text1,
             Location = new Point(95, 10),
-            Size = new Size(540, 48),
+            Size = new Size(370, 48),
             BackColor = Color.Transparent,
             AutoSize = false,
             Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
@@ -1377,6 +1424,34 @@ class DeviceCard : Panel
         };
         Controls.Add(nameLabel);
         PropagateHover(nameLabel);
+
+        // Per-device volume slider with percentage readout
+        volumeSlider = new VolumeSlider
+        {
+            Location = new Point(478, 27),
+            Size = new Size(120, 16),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        volumeLabel = new Label
+        {
+            Text = "100%",
+            Font = new Font("Segoe UI", 9),
+            ForeColor = Text3,
+            Location = new Point(602, 25),
+            Size = new Size(42, 20),
+            BackColor = Color.Transparent,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        volumeSlider.ValueChanged += (s, e) =>
+        {
+            volumeLabel.Text = $"{volumeSlider.Value}%";
+            VolumeChanged?.Invoke(this, EventArgs.Empty);
+        };
+        Controls.Add(volumeSlider);
+        Controls.Add(volumeLabel);
+        PropagateHover(volumeSlider);
+        PropagateHover(volumeLabel);
 
         // Channel mode dropdown
         channelCombo = new CustomDropdown
@@ -1916,6 +1991,104 @@ class CustomDropdown : Panel
 }
 #endregion
 
+#region Volume Slider
+/// <summary>
+/// A minimal custom-drawn horizontal slider (0-100) matching the dark theme.
+/// Used for per-device volume on device cards.
+/// </summary>
+class VolumeSlider : Control
+{
+    private static readonly Color Track = Color.FromArgb(40, 255, 255, 255);
+    private static readonly Color Fill = Color.FromArgb(43, 217, 127);
+    private static readonly Color Thumb = Color.FromArgb(234, 234, 234);
+    private const int ThumbRadius = 6;
+
+    private int sliderValue = 100;
+    private bool dragging;
+
+    public event EventHandler? ValueChanged;
+
+    /// <summary>Slider position, clamped to 0-100.</summary>
+    public int Value
+    {
+        get => sliderValue;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (clamped != sliderValue)
+            {
+                sliderValue = clamped;
+                Invalidate();
+                ValueChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    public VolumeSlider()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        Size = new Size(120, 16);
+    }
+
+    private void SetValueFromMouse(int x)
+    {
+        int trackWidth = Math.Max(1, Width - ThumbRadius * 2);
+        Value = (int)Math.Round(100.0 * (x - ThumbRadius) / trackWidth);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Left)
+        {
+            dragging = true;
+            SetValueFromMouse(e.X);
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (dragging) SetValueFromMouse(e.X);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        dragging = false;
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        Value += Math.Sign(e.Delta) * 5;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+        int trackY = Height / 2 - 2;
+        int trackWidth = Width - ThumbRadius * 2;
+        int fillWidth = (int)(trackWidth * sliderValue / 100.0);
+
+        using (var brush = new SolidBrush(Track))
+            e.Graphics.FillRectangle(brush, ThumbRadius, trackY, trackWidth, 4);
+
+        using (var brush = new SolidBrush(Fill))
+            e.Graphics.FillRectangle(brush, ThumbRadius, trackY, fillWidth, 4);
+
+        using (var brush = new SolidBrush(Thumb))
+            e.Graphics.FillEllipse(brush, fillWidth, Height / 2 - ThumbRadius, ThumbRadius * 2, ThumbRadius * 2);
+    }
+}
+#endregion
+
 #region Helper Classes
 /// <summary>
 /// Wrapper for MMDevice to display friendly name in dropdowns.
@@ -1961,16 +2134,29 @@ class ChannelMixingProvider : IWaveProvider
     private readonly BufferedWaveProvider bufferedProvider;
     private readonly int channelMode;
 
+    // Per-device gain, read on the playback thread while the UI thread writes it.
+    // Plain float reads/writes are atomic, so no lock is needed.
+    private float volume;
+
     public WaveFormat WaveFormat => bufferedProvider.WaveFormat;
+
+    /// <summary>Per-device output volume (0.0 - 1.0). Safe to change during playback.</summary>
+    public float Volume
+    {
+        get => volume;
+        set => volume = Math.Clamp(value, 0f, 1f);
+    }
 
     /// <summary>
     /// Creates a new channel mixing provider.
     /// </summary>
     /// <param name="sourceFormat">Audio format from the source</param>
     /// <param name="mode">Channel mixing mode (0-9)</param>
-    public ChannelMixingProvider(WaveFormat sourceFormat, int mode)
+    /// <param name="initialVolume">Initial per-device volume (0.0 - 1.0)</param>
+    public ChannelMixingProvider(WaveFormat sourceFormat, int mode, float initialVolume = 1f)
     {
         channelMode = mode;
+        volume = Math.Clamp(initialVolume, 0f, 1f);
         bufferedProvider = new BufferedWaveProvider(sourceFormat)
         {
             // Discard old audio when buffer is full - prevents latency buildup
@@ -2002,8 +2188,8 @@ class ChannelMixingProvider : IWaveProvider
             Array.Clear(outBuffer, offset + read, count - read);
         }
 
-        // Apply channel mixing if not in stereo pass-through mode
-        if (channelMode > 0 && bufferedProvider.WaveFormat.Channels == 2 && read > 0)
+        // Apply channel mixing and/or per-device volume
+        if ((channelMode > 0 || volume < 1f) && bufferedProvider.WaveFormat.Channels == 2 && read > 0)
         {
             ApplyChannelMixing(outBuffer, offset, read);
         }
@@ -2012,7 +2198,7 @@ class ChannelMixingProvider : IWaveProvider
     }
 
     /// <summary>
-    /// Applies the selected channel mixing mode to the audio buffer.
+    /// Applies the selected channel mixing mode and per-device volume to the buffer.
     /// Supports 32-bit IEEE float stereo (the format WASAPI loopback capture
     /// delivers in shared mode) as well as 16-bit PCM stereo.
     /// </summary>
@@ -2027,6 +2213,9 @@ class ChannelMixingProvider : IWaveProvider
         int bytesPerSample = format.BitsPerSample / 8;
         int samplePairs = count / (bytesPerSample * 2);
 
+        // Snapshot the volume once per buffer so the whole block gets a consistent gain
+        float gain = volume;
+
         for (int i = 0; i < samplePairs; i++)
         {
             int leftIndex = offset + (i * bytesPerSample * 2);
@@ -2040,36 +2229,38 @@ class ChannelMixingProvider : IWaveProvider
                 ? BitConverter.ToSingle(buffer, rightIndex)
                 : BitConverter.ToInt16(buffer, rightIndex) / 32768f;
 
-            float value;
+            float outLeft, outRight;
             switch (channelMode)
             {
                 case 1: // Left - left channel to both outputs
                 case 4: // Front Left
-                    value = left;
+                    outLeft = outRight = left;
                     break;
                 case 2: // Right - right channel to both outputs
                 case 5: // Front Right
-                    value = right;
+                    outLeft = outRight = right;
                     break;
                 case 3: // Center/Mono - mix both channels
                 case 8: // Back/Surround
-                    value = (left + right) * 0.5f;
+                    outLeft = outRight = (left + right) * 0.5f;
                     break;
                 case 6: // Back Left - left channel at reduced volume
-                    value = left * 0.85f;
+                    outLeft = outRight = left * 0.85f;
                     break;
                 case 7: // Back Right - right channel at reduced volume
-                    value = right * 0.85f;
+                    outLeft = outRight = right * 0.85f;
                     break;
                 case 9: // Subwoofer/LFE - mono with bass emphasis
-                    value = (left + right) * 0.5f * 1.3f;
+                    outLeft = outRight = (left + right) * 0.5f * 1.3f;
                     break;
-                default:
-                    continue;
+                default: // Stereo pass-through (only reached when applying volume)
+                    outLeft = left;
+                    outRight = right;
+                    break;
             }
 
-            WriteSample(buffer, leftIndex, value, isFloat);
-            WriteSample(buffer, rightIndex, value, isFloat);
+            WriteSample(buffer, leftIndex, outLeft * gain, isFloat);
+            WriteSample(buffer, rightIndex, outRight * gain, isFloat);
         }
     }
 

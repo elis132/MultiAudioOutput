@@ -8,6 +8,7 @@ public class DeviceSettings
     public string CustomName { get; set; } = "";
     public int ChannelMode { get; set; } = 0;
     public bool IsSelected { get; set; } = false;
+    public float Volume { get; set; } = 1.0f;
 }
 
 public class AppSettings

@@ -36,6 +36,7 @@ Unlike other solutions that require virtual audio cables or complex routing, Mul
   - Subwoofer (LFE)
   - Full surround sound support (5.1, 7.1)
 - 🎚️ **Per-Device Control** - Enable/disable devices on the fly
+- 🔉 **Per-Device Volume** - Individual volume slider for every output, adjustable while playing
 - 🏷️ **Custom Device Names** - Rename devices for easy identification
 
 ### User Experience
