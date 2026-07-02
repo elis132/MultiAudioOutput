@@ -142,9 +142,3 @@ Install: .NET 8.0 SDK
 - [CONTRIBUTING.md](CONTRIBUTING.md) - How to contribute
 - [docs/installer.md](docs/installer.md) - Installation guide
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) - Release process
-- [PRODUCTION_READY.md](PRODUCTION_READY.md) - Production checklist
-- [TRANSFORMATION_COMPLETE.md](TRANSFORMATION_COMPLETE.md) - What was done
-
----
-
-**Need help? Check [PRODUCTION_READY.md](PRODUCTION_READY.md) for detailed testing commands.**

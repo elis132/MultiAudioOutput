@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+using System.Text.Json;
 
 namespace MultiAudioOutput;
 
@@ -18,13 +18,15 @@ public class AppSettings
     public bool StartMinimized { get; set; } = false;
     public bool AutoStart { get; set; } = false;
     public List<DeviceSettings> Devices { get; set; } = new();
-    
+
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "MultiAudioOutput",
         "settings.json"
     );
-    
+
     public static AppSettings Load()
     {
         try
@@ -32,13 +34,16 @@ public class AppSettings
             if (File.Exists(SettingsPath))
             {
                 var json = File.ReadAllText(SettingsPath);
-                return JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
+                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Log("Failed to load settings, using defaults", ex);
+        }
         return new AppSettings();
     }
-    
+
     public void Save()
     {
         try
@@ -46,24 +51,27 @@ public class AppSettings
             var dir = Path.GetDirectoryName(SettingsPath)!;
             if (!Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
-            
-            var json = JsonConvert.SerializeObject(this, Formatting.Indented);
+
+            var json = JsonSerializer.Serialize(this, JsonOptions);
             File.WriteAllText(SettingsPath, json);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Log("Failed to save settings", ex);
+        }
     }
-    
+
     public void SetStartWithWindows(bool enabled)
     {
         StartWithWindows = enabled;
-        
+
         try
         {
             var keyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(keyPath, true);
-            
+
             if (key == null) return;
-            
+
             if (enabled)
             {
                 var exePath = Application.ExecutablePath;
@@ -74,6 +82,9 @@ public class AppSettings
                 key.DeleteValue("MultiAudioOutput", false);
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Log("Failed to update Start with Windows registry entry", ex);
+        }
     }
 }

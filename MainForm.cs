@@ -50,6 +50,15 @@ public partial class MainForm : Form
     private CustomDropdown sourceCombo = null!;    // Source device selection dropdown
     private Panel titleBar = null!;                // Custom title bar for borderless window
     private ToolTip mainTooltip = null!;           // Themed tooltip for UI elements
+
+    // Controls whose text is re-applied when the language changes
+    private Label sourceLabel = null!;
+    private Label outputsLabel = null!;
+    private ToolStripMenuItem trayShowItem = null!;
+    private ToolStripMenuItem trayStartItem = null!;
+    private ToolStripMenuItem trayStopItem = null!;
+    private ToolStripMenuItem traySettingsItem = null!;
+    private ToolStripMenuItem trayExitItem = null!;
     #endregion
 
     #region Audio State
@@ -63,10 +72,6 @@ public partial class MainForm : Form
     #region Settings and State
     private AppSettings settings = null!;  // Persisted application settings
     private bool startMinimized;           // Whether app started minimized (from command line)
-
-    // Window dragging state (for borderless window)
-    private Point lastMousePosition;
-    private bool isDragging = false;
     #endregion
 
     #region Windows API Imports
@@ -76,6 +81,28 @@ public partial class MainForm : Form
     /// </summary>
     [DllImport("dwmapi.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
     private static extern void DwmSetWindowAttribute(IntPtr hwnd, uint attr, ref int attrValue, int attrSize);
+
+    // Native move/resize for the borderless window. Sending WM_NCLBUTTONDOWN with a
+    // hit-test code lets Windows run its own move/size loop (smooth dragging, snap, etc.)
+    [DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+
+    private const int WM_NCLBUTTONDOWN = 0xA1;
+    private const int HTCAPTION = 2;
+    private const int HTLEFT = 10;
+    private const int HTRIGHT = 11;
+    private const int HTTOP = 12;
+    private const int HTTOPLEFT = 13;
+    private const int HTTOPRIGHT = 14;
+    private const int HTBOTTOM = 15;
+    private const int HTBOTTOMLEFT = 16;
+    private const int HTBOTTOMRIGHT = 17;
+
+    // Width in pixels of the invisible resize band along the window edges
+    private const int ResizeGrip = 8;
     #endregion
 
     #region Constructor and Initialization
@@ -131,6 +158,7 @@ public partial class MainForm : Form
         // === Window Configuration ===
         Text = "Multi Audio Output";
         Size = new Size(900, 680);
+        MinimumSize = new Size(760, 620);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.None;  // Borderless for custom title bar
         BackColor = Bg;
@@ -173,29 +201,34 @@ public partial class MainForm : Form
         // === Custom Title Bar (for borderless window) ===
         titleBar = new Panel
         {
-            Location = new Point(0, 0),
+            // Initial size matters even when docked: right-anchored children compute
+            // their offsets from it before the first dock layout runs
             Size = new Size(900, 40),
+            Dock = DockStyle.Top,
             BackColor = Bg,
             Cursor = Cursors.Hand
         };
 
-        // Enable window dragging via title bar
+        // Drag to move (native move loop), double-click to maximize/restore,
+        // top band resizes
         titleBar.MouseDown += (s, e) =>
         {
-            if (e.Button == MouseButtons.Left)
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Clicks == 2)
             {
-                isDragging = true;
-                lastMousePosition = e.Location;
+                ToggleMaximize();
+            }
+            else if (e.Y <= 4 && WindowState == FormWindowState.Normal)
+            {
+                StartNativeWindowAction(
+                    e.X < ResizeGrip ? HTTOPLEFT :
+                    e.X >= titleBar.Width - ResizeGrip ? HTTOPRIGHT : HTTOP);
+            }
+            else
+            {
+                StartNativeWindowAction(HTCAPTION);
             }
         };
-        titleBar.MouseMove += (s, e) =>
-        {
-            if (isDragging)
-            {
-                Location = new Point(Location.X + e.X - lastMousePosition.X, Location.Y + e.Y - lastMousePosition.Y);
-            }
-        };
-        titleBar.MouseUp += (s, e) => isDragging = false;
 
         // Title text
         var titleBarTitle = new Label
@@ -207,6 +240,12 @@ public partial class MainForm : Form
             AutoSize = true,
             BackColor = Color.Transparent
         };
+        titleBarTitle.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Clicks == 2) ToggleMaximize();
+            else StartNativeWindowAction(HTCAPTION);
+        };
         titleBar.Controls.Add(titleBarTitle);
 
         // Close button (minimizes to tray)
@@ -214,6 +253,7 @@ public partial class MainForm : Form
         {
             Text = "✕",
             Location = new Point(860, 0),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Size = new Size(40, 40),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.Transparent,
@@ -237,6 +277,7 @@ public partial class MainForm : Form
         {
             Text = "−",
             Location = new Point(820, 0),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Size = new Size(40, 40),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.Transparent,
@@ -260,11 +301,12 @@ public partial class MainForm : Form
         {
             Location = new Point(30, 60),
             Size = new Size(840, 530),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
             BackColor = Color.Transparent
         };
 
         // Source device section label
-        var sourceLabel = new Label
+        sourceLabel = new Label
         {
             Text = "SOURCE DEVICE",
             Font = new Font("Segoe UI", 11f),
@@ -280,6 +322,7 @@ public partial class MainForm : Form
         {
             Location = new Point(0, 30),
             Size = new Size(840, 40),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             BackColor = Surface2,
             ForeColor = Text1,
             Font = new Font("Segoe UI", 10f)
@@ -293,7 +336,7 @@ public partial class MainForm : Form
         container.Controls.Add(sourceCombo);
 
         // Output devices section label
-        var outputsLabel = new Label
+        outputsLabel = new Label
         {
             Text = "OUTPUT DEVICES",
             Font = new Font("Segoe UI", 11f),
@@ -309,12 +352,14 @@ public partial class MainForm : Form
         {
             Location = new Point(0, 120),
             Size = new Size(840, 400),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
             BackColor = Color.Transparent,
             AutoScroll = true,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             Padding = new Padding(0, 0, 10, 0)
         };
+        deviceCardsPanel.Resize += (s, e) => ResizeDeviceCards();
         container.Controls.Add(deviceCardsPanel);
 
         Controls.Add(container);
@@ -322,8 +367,8 @@ public partial class MainForm : Form
         // === Bottom Bar (status and buttons) ===
         var bottomBar = new Panel
         {
-            Location = new Point(0, 600),
             Size = new Size(900, 80),
+            Dock = DockStyle.Bottom,
             BackColor = Bg
         };
 
@@ -331,7 +376,19 @@ public partial class MainForm : Form
         bottomBar.Paint += (s, e) =>
         {
             using var pen = new Pen(BorderSoft, 1);
-            e.Graphics.DrawLine(pen, 0, 0, 900, 0);
+            e.Graphics.DrawLine(pen, 0, 0, bottomBar.Width, 0);
+        };
+
+        // Bottom band of the bar doubles as the window's bottom resize edge
+        bottomBar.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left || WindowState != FormWindowState.Normal) return;
+            if (e.Y >= bottomBar.Height - ResizeGrip)
+            {
+                StartNativeWindowAction(
+                    e.X < ResizeGrip ? HTBOTTOMLEFT :
+                    e.X >= bottomBar.Width - ResizeGrip ? HTBOTTOMRIGHT : HTBOTTOM);
+            }
         };
 
         // Status label
@@ -351,6 +408,7 @@ public partial class MainForm : Form
         {
             Location = new Point(550, 20),
             Size = new Size(320, 45),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             BackColor = Color.Transparent
         };
 
@@ -391,13 +449,19 @@ public partial class MainForm : Form
         Controls.Add(bottomBar);
 
         // === System Tray Configuration ===
+        // Item texts are assigned in ApplyLocalization so they follow language changes
         trayMenu = new ContextMenuStrip();
-        trayMenu.Items.Add(Localization.Get("ShowWindow"), null, (s, e) => { Show(); WindowState = FormWindowState.Normal; });
-        trayMenu.Items.Add(Localization.Get("StartAudio"), null, (s, e) => StartAudio());
-        trayMenu.Items.Add(Localization.Get("StopAudio"), null, (s, e) => StopAudio());
+        trayShowItem = new ToolStripMenuItem("", null, (s, e) => { Show(); WindowState = FormWindowState.Normal; });
+        trayStartItem = new ToolStripMenuItem("", null, (s, e) => StartAudio());
+        trayStopItem = new ToolStripMenuItem("", null, (s, e) => StopAudio());
+        traySettingsItem = new ToolStripMenuItem("", null, (s, e) => ShowSettingsDialog());
+        trayExitItem = new ToolStripMenuItem("", null, (s, e) => Application.Exit());
+        trayMenu.Items.Add(trayShowItem);
+        trayMenu.Items.Add(trayStartItem);
+        trayMenu.Items.Add(trayStopItem);
         trayMenu.Items.Add("-");
-        trayMenu.Items.Add(Localization.Get("Settings"), null, (s, e) => ShowSettingsDialog());
-        trayMenu.Items.Add(Localization.Get("Exit"), null, (s, e) => Application.Exit());
+        trayMenu.Items.Add(traySettingsItem);
+        trayMenu.Items.Add(trayExitItem);
 
         trayIcon = new NotifyIcon
         {
@@ -421,12 +485,37 @@ public partial class MainForm : Form
 
         ResumeLayout(false);
 
+        ApplyLocalization();
+
         // Handle minimized start
         if (startMinimized)
         {
             WindowState = FormWindowState.Minimized;
             Hide();
         }
+    }
+
+    /// <summary>
+    /// Applies the current language to all visible UI text.
+    /// Called at startup and immediately when the user changes the language,
+    /// so no restart is needed.
+    /// </summary>
+    private void ApplyLocalization()
+    {
+        sourceLabel.Text = Localization.Get("SourceDevice").ToUpperInvariant();
+        outputsLabel.Text = Localization.Get("OutputDevices").ToUpperInvariant();
+        startButton.Text = Localization.Get("Start").ToUpperInvariant();
+        stopButton.Text = Localization.Get("Stop");
+
+        trayShowItem.Text = Localization.Get("Show");
+        trayStartItem.Text = Localization.Get("Start");
+        trayStopItem.Text = Localization.Get("Stop");
+        traySettingsItem.Text = Localization.Get("Settings");
+        trayExitItem.Text = Localization.Get("Exit");
+
+        statusLabel.Text = isRunning
+            ? string.Format(Localization.Get("Running"), outputDevices.Count)
+            : Localization.Get("Stopped");
     }
     #endregion
 
@@ -441,6 +530,80 @@ public partial class MainForm : Form
         // Draw subtle border around borderless window
         using var pen = new Pen(BorderSoft, 1);
         e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+    }
+    #endregion
+
+    #region Window Move and Resize
+    /// <summary>
+    /// Hands the mouse interaction to Windows' native move/size loop.
+    /// </summary>
+    /// <param name="hitTest">HT* code describing which window part is being dragged</param>
+    private void StartNativeWindowAction(int hitTest)
+    {
+        ReleaseCapture();
+        SendMessage(Handle, WM_NCLBUTTONDOWN, hitTest, 0);
+    }
+
+    /// <summary>
+    /// Toggles between maximized and normal window state.
+    /// Bounds are capped to the working area so the taskbar stays visible.
+    /// </summary>
+    private void ToggleMaximize()
+    {
+        if (WindowState == FormWindowState.Maximized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+        else
+        {
+            MaximizedBounds = Screen.FromControl(this).WorkingArea;
+            WindowState = FormWindowState.Maximized;
+        }
+    }
+
+    /// <summary>
+    /// Turns the outer band of the (borderless) window into resize edges.
+    /// Only applies where the form itself is under the cursor; the title bar
+    /// and bottom bar handle their own edges via MouseDown.
+    /// </summary>
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCHITTEST = 0x84;
+        const int HTCLIENT = 1;
+
+        base.WndProc(ref m);
+
+        if (m.Msg == WM_NCHITTEST && (int)m.Result == HTCLIENT && WindowState == FormWindowState.Normal)
+        {
+            long lparam = m.LParam.ToInt64();
+            var point = PointToClient(new Point(unchecked((short)lparam), unchecked((short)(lparam >> 16))));
+
+            bool onLeft = point.X < ResizeGrip;
+            bool onRight = point.X >= Width - ResizeGrip;
+            bool onTop = point.Y < ResizeGrip;
+            bool onBottom = point.Y >= Height - ResizeGrip;
+
+            if (onTop && onLeft) m.Result = HTTOPLEFT;
+            else if (onTop && onRight) m.Result = HTTOPRIGHT;
+            else if (onBottom && onLeft) m.Result = HTBOTTOMLEFT;
+            else if (onBottom && onRight) m.Result = HTBOTTOMRIGHT;
+            else if (onLeft) m.Result = HTLEFT;
+            else if (onRight) m.Result = HTRIGHT;
+            else if (onTop) m.Result = HTTOP;
+            else if (onBottom) m.Result = HTBOTTOM;
+        }
+    }
+
+    /// <summary>
+    /// Keeps device cards as wide as the scrollable panel that holds them.
+    /// </summary>
+    private void ResizeDeviceCards()
+    {
+        int width = Math.Max(500, deviceCardsPanel.ClientSize.Width - deviceCardsPanel.Padding.Right);
+        foreach (var card in deviceCards)
+        {
+            card.Width = width;
+        }
     }
     #endregion
 
@@ -592,6 +755,8 @@ public partial class MainForm : Form
             deviceCardsPanel.Controls.Add(card);
         }
 
+        ResizeDeviceCards();
+
         // Restore selected source device
         if (!string.IsNullOrEmpty(settings.SourceDeviceId))
         {
@@ -609,7 +774,7 @@ public partial class MainForm : Form
         if (sourceCombo.SelectedIndex == -1 && sourceCombo.Items.Count > 0)
             sourceCombo.SelectedIndex = 0;
 
-        statusLabel.Text = $"{devices.Count} devices found";
+        statusLabel.Text = string.Format(Localization.Get("FoundDevices"), devices.Count);
     }
 
     /// <summary>
@@ -645,7 +810,7 @@ public partial class MainForm : Form
     /// </summary>
     private void RenameDevice(DeviceCard card)
     {
-        var dialog = new InputDialog("Rename Device", "Enter new name:", card.CustomName);
+        var dialog = new InputDialog(Localization.Get("RenameDevice"), Localization.Get("EnterNewName"), card.CustomName);
         if (dialog.ShowDialog() == DialogResult.OK)
         {
             card.CustomName = dialog.InputText;
@@ -700,13 +865,13 @@ public partial class MainForm : Form
         var selectedCards = deviceCards.Where(c => c.IsEnabled).ToList();
         if (selectedCards.Count == 0)
         {
-            MessageBox.Show(Localization.Get("NoDevicesSelected"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(Localization.Get("SelectDevice"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         if (sourceCombo.SelectedItem is not DeviceItem sourceItem)
         {
-            MessageBox.Show(Localization.Get("NoSourceSelected"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(Localization.Get("SelectSource"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -749,7 +914,7 @@ public partial class MainForm : Form
             {
                 loopbackCapture?.Dispose();
                 loopbackCapture = null;
-                MessageBox.Show(Localization.Get("NoValidOutputs"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(Localization.Get("SelectDevice"), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -780,14 +945,15 @@ public partial class MainForm : Form
             isRunning = true;
             startButton.Visible = false;
             stopButton.Visible = true;
-            statusLabel.Text = $"Playing on {outputDevices.Count} device(s)";
+            statusLabel.Text = string.Format(Localization.Get("Running"), outputDevices.Count);
             statusLabel.ForeColor = Accent;
 
             trayIcon.Text = "Multi Audio Output - Running";
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Error starting audio: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Logger.Log("Failed to start audio routing", ex);
+            MessageBox.Show(string.Format(Localization.Get("CouldNotStart"), ex.Message), Localization.Get("Error"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             StopAudio();
         }
     }
@@ -817,12 +983,15 @@ public partial class MainForm : Form
             isRunning = false;
             stopButton.Visible = false;
             startButton.Visible = true;
-            statusLabel.Text = "Ready";
+            statusLabel.Text = Localization.Get("Stopped");
             statusLabel.ForeColor = Text2;
 
             trayIcon.Text = "Multi Audio Output";
         }
-        catch { /* Ignore cleanup errors */ }
+        catch (Exception ex)
+        {
+            Logger.Log("Error while stopping audio", ex);
+        }
     }
 
     /// <summary>
@@ -921,7 +1090,9 @@ public partial class MainForm : Form
                 // Restore status label on UI thread
                 this.Invoke(() =>
                 {
-                    statusLabel.Text = isRunning ? $"Playing on {outputDevices.Count} device(s)" : "Ready";
+                    statusLabel.Text = isRunning
+                        ? string.Format(Localization.Get("Running"), outputDevices.Count)
+                        : Localization.Get("Stopped");
                     statusLabel.ForeColor = isRunning ? Accent : Text2;
                 });
             }
@@ -946,8 +1117,9 @@ public partial class MainForm : Form
             settings.SetStartWithWindows(settings.StartWithWindows);
             settings.Save();
 
+            // Re-apply UI text in the new language immediately - no restart needed
             Localization.SetLanguage(settings.Language);
-            MessageBox.Show(Localization.Get("RestartRequired"), "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ApplyLocalization();
         }
     }
     #endregion
@@ -966,7 +1138,10 @@ public partial class MainForm : Form
                 return new Icon(iconPath);
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Log("Failed to load tray icon, using system default", ex);
+        }
 
         // Fallback to default system icon
         return SystemIcons.Application;
@@ -1197,7 +1372,7 @@ class DeviceCard : Panel
             Size = new Size(540, 48),
             BackColor = Color.Transparent,
             AutoSize = false,
-            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
             UseMnemonic = false
         };
         Controls.Add(nameLabel);
@@ -1428,7 +1603,7 @@ class SettingsDialog : Form
         // OK button
         var okBtn = new Button
         {
-            Text = "OK",
+            Text = Localization.Get("Save"),
             Location = new Point(240, 310),
             Size = new Size(80, 35),
             DialogResult = DialogResult.OK,
@@ -1442,7 +1617,7 @@ class SettingsDialog : Form
         // Cancel button
         var cancelBtn = new Button
         {
-            Text = "Cancel",
+            Text = Localization.Get("Cancel"),
             Location = new Point(330, 310),
             Size = new Size(80, 35),
             DialogResult = DialogResult.Cancel,
@@ -1515,7 +1690,7 @@ class InputDialog : Form
 
         var cancelBtn = new Button
         {
-            Text = "Cancel",
+            Text = Localization.Get("Cancel"),
             Location = new Point(285, 110),
             Size = new Size(75, 30),
             DialogResult = DialogResult.Cancel,
