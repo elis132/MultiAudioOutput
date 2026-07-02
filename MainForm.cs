@@ -64,10 +64,6 @@ public partial class MainForm : Form
     private AppSettings settings = null!;  // Persisted application settings
     private bool startMinimized;           // Whether app started minimized (from command line)
 
-    // Pulse animation for visual feedback when running
-    private System.Windows.Forms.Timer? pulseTimer;
-    private float pulseValue = 0f;
-
     // Window dragging state (for borderless window)
     private Point lastMousePosition;
     private bool isDragging = false;
@@ -107,15 +103,6 @@ public partial class MainForm : Form
         {
             Load += (s, e) => StartAudio();
         }
-
-        // Setup pulse animation timer for visual feedback
-        pulseTimer = new System.Windows.Forms.Timer { Interval = 50 };
-        pulseTimer.Tick += (s, e) =>
-        {
-            pulseValue = (pulseValue + 0.1f) % (float)(Math.PI * 2);
-            if (isRunning) Invalidate(true);
-        };
-        pulseTimer.Start();
     }
 
     /// <summary>
@@ -576,19 +563,13 @@ public partial class MainForm : Form
 
         using var enumerator = new MMDeviceEnumerator();
 
-        // Source dropdown: Only render (output) devices work with loopback capture
-        // Loopback capture records what's being played to an output device
-        var sourceDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        foreach (var device in sourceDevices)
-        {
-            sourceCombo.Items.Add(new DeviceItem(device));
-        }
-
-        // Output cards: All render devices can be targets
+        // Render (output) devices serve both roles: loopback capture sources
+        // (capture records what's being played to an output) and output targets
         var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
 
         foreach (var device in devices)
         {
+            sourceCombo.Items.Add(new DeviceItem(device));
 
             var card = new DeviceCard(device);
 
@@ -772,10 +753,14 @@ public partial class MainForm : Form
                 return;
             }
 
-            // Wire up audio data flow: source -> all mixers
+            // Wire up audio data flow: source -> all mixers.
+            // Snapshot the mixer list: DataAvailable fires on the capture thread,
+            // while StopAudio clears the list on the UI thread. Iterating the
+            // snapshot avoids a race on the shared list.
+            var activeMixers = mixers.ToArray();
             loopbackCapture.DataAvailable += (s, e) =>
             {
-                foreach (var mixer in mixers)
+                foreach (var mixer in activeMixers)
                 {
                     mixer.AddSamples(e.Buffer, 0, e.BytesRecorded);
                 }
@@ -996,8 +981,6 @@ public partial class MainForm : Form
     {
         if (disposing)
         {
-            pulseTimer?.Stop();
-            pulseTimer?.Dispose();
             StopAudio();
             trayIcon?.Dispose();
         }
@@ -1345,19 +1328,6 @@ class DeviceCard : Panel
         if (name.Contains("speaker")) return "🔊";
         if (name.Contains("monitor") || name.Contains("display")) return "🖥️";
         return "🔈";
-    }
-
-    /// <summary>
-    /// Returns a human-readable device type description.
-    /// </summary>
-    private string GetDeviceType(MMDevice device)
-    {
-        var name = device.FriendlyName.ToLower();
-        if (name.Contains("headphone")) return "Headphones";
-        if (name.Contains("speaker")) return "Speakers";
-        if (name.Contains("monitor") || name.Contains("display")) return "Monitor Audio";
-        if (name.Contains("hdmi") || name.Contains("displayport")) return "Display Audio";
-        return "Audio Device";
     }
 }
 #endregion
@@ -1868,11 +1838,18 @@ class ChannelMixingProvider : IWaveProvider
 
     /// <summary>
     /// Applies the selected channel mixing mode to the audio buffer.
-    /// Operates on 16-bit stereo samples (4 bytes per sample pair).
+    /// Supports 32-bit IEEE float stereo (the format WASAPI loopback capture
+    /// delivers in shared mode) as well as 16-bit PCM stereo.
     /// </summary>
     private void ApplyChannelMixing(byte[] buffer, int offset, int count)
     {
-        int bytesPerSample = bufferedProvider.WaveFormat.BitsPerSample / 8;
+        var format = bufferedProvider.WaveFormat;
+        bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32;
+        bool isPcm16 = format.Encoding == WaveFormatEncoding.Pcm && format.BitsPerSample == 16;
+        if (!isFloat && !isPcm16)
+            return;
+
+        int bytesPerSample = format.BitsPerSample / 8;
         int samplePairs = count / (bytesPerSample * 2);
 
         for (int i = 0; i < samplePairs; i++)
@@ -1880,62 +1857,61 @@ class ChannelMixingProvider : IWaveProvider
             int leftIndex = offset + (i * bytesPerSample * 2);
             int rightIndex = leftIndex + bytesPerSample;
 
+            // Normalize both samples to float [-1, 1] so all modes share one code path
+            float left = isFloat
+                ? BitConverter.ToSingle(buffer, leftIndex)
+                : BitConverter.ToInt16(buffer, leftIndex) / 32768f;
+            float right = isFloat
+                ? BitConverter.ToSingle(buffer, rightIndex)
+                : BitConverter.ToInt16(buffer, rightIndex) / 32768f;
+
+            float value;
             switch (channelMode)
             {
-                case 1: // Left - copy left channel to right
+                case 1: // Left - left channel to both outputs
                 case 4: // Front Left
-                    Array.Copy(buffer, leftIndex, buffer, rightIndex, bytesPerSample);
+                    value = left;
                     break;
-
-                case 2: // Right - copy right channel to left
+                case 2: // Right - right channel to both outputs
                 case 5: // Front Right
-                    Array.Copy(buffer, rightIndex, buffer, leftIndex, bytesPerSample);
+                    value = right;
                     break;
-
                 case 3: // Center/Mono - mix both channels
                 case 8: // Back/Surround
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        short mono = (short)((left + right) / 2);
-                        Array.Copy(BitConverter.GetBytes(mono), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(mono), 0, buffer, rightIndex, 2);
-                    }
+                    value = (left + right) * 0.5f;
                     break;
-
                 case 6: // Back Left - left channel at reduced volume
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short reduced = (short)(left * 0.85);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, rightIndex, 2);
-                    }
+                    value = left * 0.85f;
                     break;
-
                 case 7: // Back Right - right channel at reduced volume
-                    if (bytesPerSample == 2)
-                    {
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        short reduced = (short)(right * 0.85);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(reduced), 0, buffer, rightIndex, 2);
-                    }
+                    value = right * 0.85f;
                     break;
-
-                case 9: // Subwoofer/LFE - mono with bass boost
-                    if (bytesPerSample == 2)
-                    {
-                        short left = BitConverter.ToInt16(buffer, leftIndex);
-                        short right = BitConverter.ToInt16(buffer, rightIndex);
-                        // Mix to mono and apply 1.3x gain for bass emphasis
-                        short bass = (short)(((left + right) / 2) * 1.3);
-                        Array.Copy(BitConverter.GetBytes(bass), 0, buffer, leftIndex, 2);
-                        Array.Copy(BitConverter.GetBytes(bass), 0, buffer, rightIndex, 2);
-                    }
+                case 9: // Subwoofer/LFE - mono with bass emphasis
+                    value = (left + right) * 0.5f * 1.3f;
                     break;
+                default:
+                    continue;
             }
+
+            WriteSample(buffer, leftIndex, value, isFloat);
+            WriteSample(buffer, rightIndex, value, isFloat);
+        }
+    }
+
+    /// <summary>
+    /// Writes a normalized float sample back to the buffer, clamping to avoid
+    /// wrap-around distortion when gain pushes a sample past full scale.
+    /// </summary>
+    private static void WriteSample(byte[] buffer, int index, float value, bool isFloat)
+    {
+        if (isFloat)
+        {
+            BitConverter.TryWriteBytes(buffer.AsSpan(index, 4), Math.Clamp(value, -1f, 1f));
+        }
+        else
+        {
+            short pcm = (short)Math.Clamp(value * 32768f, short.MinValue, short.MaxValue);
+            BitConverter.TryWriteBytes(buffer.AsSpan(index, 2), pcm);
         }
     }
 }
