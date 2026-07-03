@@ -5,6 +5,31 @@ All notable changes to Multi Audio Output will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-03
+
+### Added
+- 🔉 Per-device volume control - individual slider on every output card, adjustable live while audio is running, persisted per device
+- 🪟 Resizable window - drag any edge, double-click the title bar to maximize
+- 📝 Error logging to `%AppData%\MultiAudioOutput\app.log` for easier troubleshooting
+
+### Changed
+- 🌍 Language changes now apply instantly - no restart needed
+- ⚡ Removed a hidden timer that repainted the whole window 20x per second while running
+- 📦 Replaced Newtonsoft.Json with the built-in System.Text.Json (one less dependency)
+
+### Fixed
+- 🔊 Channel modes (Center/Mono, Back Left/Right, Surround, Subwoofer) now actually work - they previously did nothing on the 32-bit float audio that Windows loopback capture delivers
+- 🎚️ Subwoofer bass boost no longer distorts on loud passages (samples are clamped)
+- 🧵 Fixed a race between the audio thread and stopping playback
+- 🚫 Launching the app twice no longer creates duplicate tray icons - the second instance shows a notice and exits
+- 🏷️ Tray menu and error dialogs showed raw translation key names (e.g. "ShowWindow") - now properly localized in all 23 languages
+
+## [1.2.0] - 2026-01-31
+
+### Changed
+- ⚡ Improved audio latency
+- 📦 Installer now supports in-place upgrades
+
 ## [1.1.0] - 2026-01-29
 
 ### Added
